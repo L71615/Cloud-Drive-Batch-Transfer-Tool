@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import traceback
@@ -22,14 +23,84 @@ from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 TERMINAL = {"done", "failed", "canceled"}
 MAX_ATTEMPTS = 3
 
+DEFAULT_SETTINGS = {
+    "concurrency": 2,
+    "qps": 0.8,
+    "retries": 3,
+    "default_target": "/PanTransfer",
+}
+
+
+class Gate:
+    """可动态改变容量的并发闸门（设置里的"同时处理任务数"）。
+
+    线程池固定 8 个 worker，真正限制并发的是这道闸：设置改小立即生效，
+    改大则等下一批任务自然补上。
+    """
+
+    def __init__(self, n: int = 2):
+        self._n = max(1, int(n))
+        self._cur = 0
+        self._cv = threading.Condition()
+
+    def set(self, n: int) -> None:
+        with self._cv:
+            self._n = max(1, int(n))
+            self._cv.notify_all()
+
+    def __enter__(self):
+        with self._cv:
+            while self._cur >= self._n:
+                self._cv.wait(timeout=0.5)
+            self._cur += 1
+        return self
+
+    def __exit__(self, *exc):
+        with self._cv:
+            self._cur -= 1
+            self._cv.notify_all()
+        return False
+
 
 class TaskRunner:
-    def __init__(self, store: Store, workers: int = 2):
+    def __init__(self, store: Store, workers: int = 8):
         self.store = store
-        self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="task")
+        self.pool = ThreadPoolExecutor(max_workers=max(4, workers), thread_name_prefix="task")
         self._lock = threading.Lock()
         self._paused: set[str] = set()
         self._canceled: set[str] = set()
+        s = self.settings()
+        self._gate = Gate(s["concurrency"])
+        self._gate.set(s["concurrency"])
+
+    # ---------------- 设置 ----------------
+    def settings(self) -> dict:
+        row = self.store.one("SELECT v FROM settings WHERE k='engine'")
+        data = dict(DEFAULT_SETTINGS)
+        if row:
+            try:
+                data.update(json.loads(row["v"]))
+            except json.JSONDecodeError:
+                pass
+        return data
+
+    def update_settings(self, patch: dict) -> dict:
+        cur = self.settings()
+        for k in DEFAULT_SETTINGS:
+            if k in patch and patch[k] is not None:
+                try:
+                    if k == "default_target":
+                        cur[k] = str(patch[k]).strip() or DEFAULT_SETTINGS[k]
+                    else:
+                        cur[k] = max(1, int(float(patch[k]))) if k != "qps" else max(0.2, min(3.0, float(patch[k])))
+                except (TypeError, ValueError):
+                    continue
+        self.store.run(
+            "INSERT INTO settings(k,v) VALUES('engine',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (json.dumps(cur, ensure_ascii=False),),
+        )
+        self._gate.set(cur["concurrency"])
+        return cur
 
     # ---------------- 对外 ----------------
     def create_task(self, provider: str, links: str, target: str, credential: str = "") -> str:
@@ -95,17 +166,59 @@ class TaskRunner:
         with self._lock:
             return task_id in self._canceled
 
+    def retry(self, task_id: str) -> None:
+        """失败任务重新排队：保留已完成条目，只重跑未完成的。"""
+        self.store.run(
+            "UPDATE tasks SET status='pending',error='',done=0,failed=0,updated_at=? WHERE id=?",
+            (now(), task_id),
+        )
+        with self._lock:
+            self._canceled.discard(task_id)
+            self._paused.discard(task_id)
+        self.pool.submit(self._run, task_id)
+
+    def delete(self, task_id: str) -> None:
+        self.store.run("DELETE FROM items WHERE task_id=?", (task_id,))
+        self.store.run("DELETE FROM tasks WHERE id=?", (task_id,))
+        with self._lock:
+            self._paused.discard(task_id)
+            self._canceled.discard(task_id)
+
+    def stats(self) -> dict:
+        row = self.store.one(
+            "SELECT"
+            " SUM(CASE WHEN status IN ('pending','resolving','listing','transferring','verifying') THEN 1 ELSE 0 END) AS running,"
+            " SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,"
+            " SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,"
+            " SUM(CASE WHEN status='paused' THEN 1 ELSE 0 END) AS paused"
+            " FROM tasks"
+        ) or {}
+        files = self.store.one("SELECT COUNT(*) AS n FROM items WHERE status='done'") or {"n": 0}
+        return {
+            "running": int(row.get("running") or 0),
+            "done": int(row.get("done") or 0),
+            "failed": int(row.get("failed") or 0),
+            "paused": int(row.get("paused") or 0),
+            "files": int(files.get("n") or 0),
+        }
+
     def _run(self, task_id: str) -> None:
+        with self._gate:
+            self._run_inner(task_id)
+
+    def _run_inner(self, task_id: str) -> None:
         task = self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
         if not task or task["status"] in TERMINAL:
             return
         links = getattr(self, f"_links_{task_id}", "")
         cred = getattr(self, f"_cred_{task_id}", "")
+        cfg = self.settings()
         try:
             if self._is_canceled(task_id):
                 return
             self._set_status(task_id, "resolving")
             prov = create(task["provider"], cred)
+            prov.qps = float(cfg.get("qps") or prov.qps)
 
             refs = prov.parse_links(links)
             if not refs:
@@ -135,7 +248,7 @@ class TaskRunner:
                     continue
                 if self._is_paused(task_id) or self._is_canceled(task_id):
                     return
-                ok, dst, err = self._transfer_with_retry(prov, ref, entry, task["target"])
+                ok, dst, err = self._transfer_with_retry(prov, ref, entry, task["target"], cfg)
                 self.store.run(
                     "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
                     " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
@@ -159,12 +272,15 @@ class TaskRunner:
             self._set_status(task_id, "failed", f"{type(e).__name__}: {e}")
             traceback.print_exc()
 
-    def _transfer_with_retry(self, prov, ref, entry, target: str) -> tuple[bool, str, str]:
+    def _transfer_with_retry(self, prov, ref, entry, target: str, cfg: dict | None = None) -> tuple[bool, str, str]:
         last = ""
-        for attempt in range(MAX_ATTEMPTS):
+        attempts = max(1, int((cfg or {}).get("retries") or MAX_ATTEMPTS))
+        for attempt in range(attempts):
             try:
                 dst = prov.transfer(ref, entry, target)
                 return True, dst, ""
+            except AuthExpired as e:
+                return False, "", f"登录态失效：{e}"
             except ProviderError as e:
                 last = str(e)
                 time.sleep(min(2 ** attempt, 5) * 0.3)

@@ -14,7 +14,13 @@ from .base import Entry, Provider, ProviderError, ShareRef
 @register
 class MockProvider(Provider):
     name = "mock"
+    label = "演示模式"
+    color = "#8b5cf6"
+    short = "演示"
     qps = 5.0
+
+    def check_auth(self) -> dict:
+        return {"valid": True, "message": "演示模式无需登录态"}
 
     @property
     def caps(self) -> dict:

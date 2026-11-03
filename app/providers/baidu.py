@@ -1,74 +1,251 @@
 # -*- coding: utf-8 -*-
-"""百度网盘适配器。
+"""百度网盘（pan.baidu.com）适配器。
 
-协议事实来自 docs/spec/baidu.md（自写规格）。端点集中放在 API 字典里：
-填它的时候只看规格，不看任何反汇编输出——这是洁净室边界。
+协议细节见 docs/spec/baidu.md。要点：
+- 分享页先换 shareid / uk，带提取码的再加一步 verify 拿 sekey；
+- 列目录与转存都是"先拿 fs_id 再批量提交"的两段式；
+- 所有 errno 都走一张表翻译，未知码原样透出，方便补规格。
 """
 from __future__ import annotations
 
+import json
 import re
+from urllib.parse import unquote
 
 from . import register
 from ._http import Client
-from .base import Entry, Provider, ProviderNotReady, ShareRef
+from .base import AuthExpired, Entry, Provider, ProviderError, ProviderNotReady, ShareRef
 
-SHARE_RE = re.compile(r"pan\.baidu\.com/s/([0-9A-Za-z_-]{4,})")
-PWD_RE = re.compile(r"(?:pwd|提取码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
+BASE = "https://pan.baidu.com"
+APP_ID = "250528"
+
+LINK_RE = re.compile(r"https?://pan\.baidu\.com/s/([0-9A-Za-z_\-]{4,})")
+PWD_RE = re.compile(r"(?:pwd|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
+
+MAX_DEPTH = 8
+MAX_ENTRIES = 5000
+
+# errno 含义需随实机响应逐步收敛（spec §8），未收录的码会原样带出来
+ERRNO = {
+    0: "成功",
+    2: "参数错误",
+    -6: "需要验证（风控）",
+    -7: "文件名非法",
+    -9: "提取码错误",
+    -62: "分享已失效",
+    4: "请求过于频繁",
+    12: "文件已存在",
+    111: "空间不足",
+    112: "转存数量超限",
+    31066: "文件不存在",
+}
 
 
 @register
 class BaiduProvider(Provider):
     name = "baidu"
+    label = "百度网盘"
+    color = "#2932e1"
+    short = "百度"
     qps = 0.8
+    BASE = "https://pan.baidu.com"
 
-    API = {
-        "share_info": "",   # spec §3
-        "share_list": "",   # spec §4
-        "transfer": "",     # spec §5
-        "list_dir": "",     # spec §6
-        "quota": "",        # spec §6
-    }
+    def __init__(self, credential: str = ""):
+        super().__init__(credential)
+        self._client: Client | None = None
+        self._share: dict[str, dict] = {}   # share_id -> {shareid, uk, sekey}
 
     @property
-    def caps(self) -> dict:
-        return {"batch": True, "dedup": True, "max_batch": 30}
+    def ready(self) -> bool:
+        return True
 
-    def _url(self, key: str) -> str:
-        url = self.API.get(key, "")
-        if not url:
-            raise ProviderNotReady(
-                f"baidu.{key} 未配置：先补 docs/spec/baidu.md §{key}，再填 API['{key}']"
-            )
-        return url
+    # ---------------- 基础设施 ----------------
+    def _c(self) -> Client:
+        if self._client is None:
+            self._client = Client(self.name, self.credential, self.qps, referer="https://pan.baidu.com/")
+        return self._client
 
+    def _common(self) -> dict:
+        return {"channel": "chunlei", "web": "1", "app_id": APP_ID, "clienttype": "0"}
+
+    def _check(self, data: dict, what: str) -> dict:
+        if not isinstance(data, dict):
+            raise ProviderError(f"百度{what}：响应不是 JSON")
+        errno = data.get("errno")
+        if errno in (0, None):
+            return data
+        text = ERRNO.get(errno, str(data.get("errmsg") or data.get("show_msg") or "未知错误"))
+        if errno in (-6, 4):
+            raise ProviderError(f"百度{what}失败：{text}（errno={errno}）")
+        if errno in (-62, -9, 31066):
+            raise ProviderError(f"百度{what}失败：{text}（errno={errno}）")
+        raise ProviderError(f"百度{what}失败：{text}（errno={errno}）")
+
+    # ---------------- 分享 ----------------
     def parse_links(self, text: str) -> list[ShareRef]:
-        refs: list[ShareRef] = []
+        out: list[ShareRef] = []
         seen: set[str] = set()
-        # 提取码可能出现在链接后面，按整段文本就近匹配
-        for m in SHARE_RE.finditer(text):
-            sid = m.group(1)
-            if sid in seen:
+        for line in str(text or "").splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            seen.add(sid)
-            tail = text[m.end(): m.end() + 40]
-            pwd = PWD_RE.search(tail)
-            refs.append(ShareRef(self.name, sid, m.group(0), pwd.group(1) if pwd else "", ""))
-        return refs
+            m = PWD_RE.search(line)
+            pwd = m.group(1) if m else ""
+            for m in LINK_RE.finditer(line):
+                surl = m.group(1)
+                if surl in seen:
+                    continue
+                seen.add(surl)
+                out.append(ShareRef(provider=self.name, share_id=surl, url=m.group(0), passcode=pwd))
+        return out
+
+    def _verify(self, ref: ShareRef) -> str:
+        """有提取码时先过校验，返回 sekey（= 解码后的 randsk）。"""
+        if not ref.passcode:
+            return ""
+        data = self._c().request(
+            "POST", self.BASE + "/share/verify",
+            params={"surl": ref.share_id, "channel": "chunlei", "web": "1",
+                    "app_id": APP_ID, "clienttype": "0"},
+            body={"pwd": ref.passcode, "vcode": "", "vcode_str": ""},
+            form=True,
+        )
+        self._check(data, "提取码校验")
+        randsk = str(data.get("randsk") or "")
+        return unquote(randsk)
+
+    def share_meta(self, ref: ShareRef) -> dict:
+        if ref.share_id in self._share:
+            return self._share[ref.share_id]
+        data = self._c().request(
+            "GET", self.BASE + "/api/shorturlinfo",
+            params={"shorturl": ref.share_id, **self._common()},
+        )
+        d = self._check(data, "分享信息")
+        shareid = d.get("shareid")
+        uk = d.get("uk")
+        if not shareid or not uk:
+            raise ProviderError("百度分享信息缺少 shareid / uk（分享可能已失效）")
+        sekey = self._verify(ref)
+        meta = {"shareid": str(shareid), "uk": str(uk), "sekey": sekey}
+        self._share[ref.share_id] = meta
+        return meta
+
+    def _page_share(self, ref: ShareRef, meta: dict, dir_path: str, page: int) -> tuple[list[dict], int]:
+        data = self._c().request("GET", self.BASE + "/share/list", params={
+            "uk": meta["uk"], "shareid": meta["shareid"], "order": "other", "desc": "1",
+            "showempty": "0", "page": str(page), "num": "100", "dir": dir_path,
+            "t": "0", "bdstoken": "", **self._common(),
+        })
+        d = self._check(data, "列分享目录")
+        return list(d.get("list") or []), len(d.get("list") or [])
 
     def list_share(self, ref: ShareRef) -> list[Entry]:
-        client = Client(self.name, self.credential, self.qps, referer="https://pan.baidu.com/")
-        client.request("GET", self._url("share_info"), params={"surl": ref.share_id, "pwd": ref.passcode})
-        data = client.request("GET", self._url("share_list"), params={
-            "shorturl": ref.share_id, "dir": "/", "page": 1, "num": 100, "pwd": ref.passcode,
+        meta = self.share_meta(ref)
+        out: list[Entry] = []
+        queue: list[tuple[str, str, int]] = [("/", "", 0)]
+        while queue and len(out) < MAX_ENTRIES:
+            dir_path, prefix, depth = queue.pop(0)
+            if depth > MAX_DEPTH:
+                continue
+            page = 1
+            while True:
+                items, n = self._page_share(ref, meta, dir_path, page)
+                for it in items:
+                    name = str(it.get("server_filename") or "")
+                    path = f"{prefix}/{name}" if prefix else f"/{name}"
+                    if it.get("isdir"):
+                        queue.append((str(it.get("path") or f"{dir_path.rstrip('/')}/{name}"), path, depth + 1))
+                        continue
+                    out.append(Entry(
+                        path=path,
+                        size=int(it.get("size") or 0),
+                        digest=str(it.get("md5") or ""),
+                        meta={"fs_id": it.get("fs_id"), "isdir": False},
+                    ))
+                    if len(out) >= MAX_ENTRIES:
+                        break
+                if n < 100:
+                    break
+                page += 1
+        return out
+
+    # ---------------- 我的目录 ----------------
+    def _list_dir(self, path: str) -> list[dict]:
+        data = self._c().request("GET", self.BASE + "/api/list", params={
+            "dir": path, "order": "name", "num": "100", "page": "1", **self._common(),
         })
-        return self._entries(data)
+        d = self._check(data, "列目录")
+        return list(d.get("list") or [])
 
-    def _entries(self, data) -> list[Entry]:
-        raise ProviderNotReady("baidu: 响应字段映射未填，见 docs/spec/baidu.md §4.2")
+    def ensure_dir(self, path: str) -> str:
+        cur = ""
+        for seg in [s for s in str(path or "").split("/") if s]:
+            parent = cur or "/"
+            cur = f"{cur}/{seg}"
+            names = {str(x.get("server_filename")) for x in self._list_dir(parent) if x.get("isdir")}
+            if seg in names:
+                continue
+            data = self._c().request(
+                "POST", self.BASE + "/api/create",
+                params={"a": "commit", **self._common()},
+                body={"path": cur, "isdir": "1", "block_list": "[]", "size": "0"},
+                form=True,
+            )
+            d = self._check(data, "建目录")
+            if d.get("errno") not in (0, None) and d.get("errno") != 12:
+                raise ProviderError(f"创建目录失败：{cur}")
+        return cur or "/"
 
+    # ---------------- 转存 ----------------
     def transfer(self, ref: ShareRef, entry: Entry, target: str) -> str:
-        client = Client(self.name, self.credential, self.qps, referer="https://pan.baidu.com/")
-        client.request("POST", self._url("transfer"), form=True, body={
-            "fsidlist": entry.digest or entry.path, "path": target,
+        meta = self.share_meta(ref)
+        dest = self.ensure_dir(target)
+        fs_id = entry.meta.get("fs_id")
+        if fs_id in (None, ""):
+            raise ProviderError("缺少 fs_id，无法转存")
+        data = self._c().request(
+            "POST", self.BASE + "/share/transfer",
+            params={
+                "shareid": meta["shareid"], "from": meta["uk"], "sekey": meta["sekey"],
+                "ondup": "newcopy", "async": "1", **self._common(),
+            },
+            body={"fsidlist": json.dumps([fs_id]), "path": dest},
+            form=True,
+        )
+        d = self._check(data, "转存")
+        for item in (d.get("extra") or {}).get("list") or []:
+            if "to" in item:
+                return str(item["to"])
+        name = entry.path.rsplit("/", 1)[-1]
+        return f"{dest.rstrip('/')}/{name}"
+
+    # ---------------- 其它 ----------------
+    def list_dir(self, path: str = "/") -> list[Entry]:
+        return [
+            Entry(
+                path=f"/{x.get('server_filename')}",
+                size=int(x.get("size") or 0),
+                digest=str(x.get("md5") or ""),
+                meta={"fs_id": x.get("fs_id"), "isdir": bool(x.get("isdir"))},
+            )
+            for x in self._list_dir(path)
+        ]
+
+    def quota(self) -> dict:
+        data = self._c().request("GET", self.BASE + "/api/quota", params={
+            "checkfree": "1", "checkexpire": "1", **self._common(),
         })
-        return f"{target.rstrip('/')}/{entry.path.rsplit('/', 1)[-1]}"
+        d = self._check(data, "查询容量")
+        total = int(d.get("total") or 0)
+        used = int(d.get("used") or 0)
+        return {"total": total, "used": used, "free": max(0, total - used)}
+
+    def check_auth(self) -> dict:
+        if not self.credential:
+            raise ProviderNotReady("还没有配置百度登录态（Cookie）")
+        try:
+            self._list_dir("/")
+        except AuthExpired as e:
+            return {"valid": False, "message": f"登录态已失效：{e}"}
+        return {"valid": True, "message": "登录态有效"}

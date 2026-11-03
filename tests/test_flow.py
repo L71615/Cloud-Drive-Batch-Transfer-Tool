@@ -65,11 +65,12 @@ class TestTaskFlow(unittest.TestCase):
         self.assertEqual(v["done"] + v["failed"], v["total"])
         self.assertTrue(all(i["dst"].startswith("/dst/") for i in v["items"]))
 
-    def test_real_provider_not_ready(self):
-        tid = self.runner.create_task("baidu", "https://pan.baidu.com/s/1AbCdEf", "/dst")
+    def test_real_provider_bad_link(self):
+        # 真实 provider 不联网也能校验前置逻辑：不匹配的链接应当直接失败
+        tid = self.runner.create_task("baidu", "这不是一个分享链接", "/dst")
         v = self._wait(tid)
         self.assertEqual(v["status"], "failed")
-        self.assertIn("baidu.share_info", v["error"])
+        self.assertIn("没有解析到分享链接", v["error"])
 
     def test_empty_links_fails(self):
         tid = self.runner.create_task("mock", "   ", "/dst")

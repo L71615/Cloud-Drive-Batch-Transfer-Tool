@@ -1,74 +1,46 @@
 # -*- coding: utf-8 -*-
-"""UC 网盘适配器。协议事实见 docs/spec/uc.md。
+"""UC 网盘（drive.uc.cn）适配器。
 
-UC 与夸克在接口形态上高度相似，但这里独立实现：共享抽象在 base.py，
-不共享任何私有代码，避免"同源复制"的观感。
+和夸克接口同构但端点域名、pr 参数、字段口径各自独立，见 docs/spec/uc.md。
+不要因为"长得像"就直接复用夸克的常量——两边都要各自实机校验。
 """
 from __future__ import annotations
 
 import re
 
 from . import register
-from ._http import Client
-from .base import Entry, Provider, ProviderNotReady, ShareRef
+from ._clouddrive import CloudDrive
+from .base import ShareRef
 
-SHARE_RE = re.compile(r"(?:drive|fast).uc\.cn/s/([0-9A-Za-z]{6,})")
-PWD_RE = re.compile(r"(?:pwd|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
+LINK_RE = re.compile(r"https?://(?:drive|fast)\.uc\.cn/s/([0-9A-Za-z]{6,})")
+PWD_RE = re.compile(r"(?:pwd|passcode|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
 
 
 @register
-class UcProvider(Provider):
+class UcProvider(CloudDrive):
     name = "uc"
+    label = "UC网盘"
+    color = "#ff6a00"
+    short = "UC"
     qps = 1.0
 
-    API = {
-        "share_token": "",  # spec §3
-        "share_list": "",   # spec §4
-        "transfer": "",     # spec §5
-        "list_dir": "",     # spec §6
-        "quota": "",        # spec §6
-    }
-
-    @property
-    def caps(self) -> dict:
-        return {"batch": True, "dedup": True, "max_batch": 50}
-
-    def _url(self, key: str) -> str:
-        url = self.API.get(key, "")
-        if not url:
-            raise ProviderNotReady(
-                f"uc.{key} 未配置：先补 docs/spec/uc.md §{key}，再填 API['{key}']"
-            )
-        return url
+    BASE = "https://pc-api.uc.cn"
+    PR = "UCBrowser"
+    FR = "pc"
+    REFERER = "https://drive.uc.cn/"
 
     def parse_links(self, text: str) -> list[ShareRef]:
-        refs: list[ShareRef] = []
+        out: list[ShareRef] = []
         seen: set[str] = set()
-        for m in SHARE_RE.finditer(text):
-            sid = m.group(1)
-            if sid in seen:
+        for line in str(text or "").splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            seen.add(sid)
-            tail = text[m.end(): m.end() + 40]
-            pwd = PWD_RE.search(tail)
-            refs.append(ShareRef(self.name, sid, m.group(0), pwd.group(1) if pwd else "", ""))
-        return refs
-
-    def list_share(self, ref: ShareRef) -> list[Entry]:
-        client = Client(self.name, self.credential, self.qps, referer="https://drive.uc.cn/")
-        token = client.request("POST", self._url("share_token"), body={"pwd_id": ref.share_id})
-        stoken = (token or {}).get("data", {}).get("stoken", "") if isinstance(token, dict) else ""
-        data = client.request("GET", self._url("share_list"), params={
-            "pwd_id": ref.share_id, "stoken": stoken, "pdir_fid": "0", "page": 1, "size": 100,
-        })
-        return self._entries(data)
-
-    def _entries(self, data) -> list[Entry]:
-        raise ProviderNotReady("uc: 响应字段映射未填，见 docs/spec/uc.md §4.2")
-
-    def transfer(self, ref: ShareRef, entry: Entry, target: str) -> str:
-        client = Client(self.name, self.credential, self.qps, referer="https://drive.uc.cn/")
-        client.request("POST", self._url("transfer"), body={
-            "fid_list": [entry.digest], "to_pdir_fid": target, "pwd_id": ref.share_id,
-        })
-        return f"{target.rstrip('/')}/{entry.path.rsplit('/', 1)[-1]}"
+            m = PWD_RE.search(line)
+            pwd = m.group(1) if m else ""
+            for m in LINK_RE.finditer(line):
+                if m.group(1) in seen:
+                    continue
+                seen.add(m.group(1))
+                out.append(ShareRef(provider=self.name, share_id=m.group(1), url=m.group(0), passcode=pwd))
+        return out

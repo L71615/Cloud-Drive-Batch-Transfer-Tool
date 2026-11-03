@@ -16,10 +16,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--db", default=os.path.join(os.getcwd(), "data", "pantransfer.db"))
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--open", action="store_true", help="启动后打开浏览器")
+    ap.add_argument("--gateway", default=os.environ.get("PANTRANSFER_GATEWAY", ""),
+                    help="离线联调：把三个网盘指向本地假网盘，例如 http://127.0.0.1:8899")
     args = ap.parse_args(argv)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from app.http_api import serve  # 延迟导入，保证 --help 不依赖包路径
+    from app.providers import apply_dev_gateway  # 延迟导入，保证 --help 不依赖包路径
+    from app.http_api import serve
+
+    if args.gateway:
+        apply_dev_gateway(args.gateway)
+        print(f"[dev] 使用本地假网盘网关: {args.gateway}")
 
     httpd = serve(args.host, args.port, args.db, workers=args.workers)
     url = f"http://{args.host}:{args.port}/"

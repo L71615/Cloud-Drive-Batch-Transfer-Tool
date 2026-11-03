@@ -1,0 +1,427 @@
+/* PanTransfer 前端：无框架、无构建，纯 DOM。 */
+(() => {
+  'use strict';
+
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+
+  const S = {
+    meta: { providers: [], version: '0.1.0' },
+    accounts: [],
+    tasks: [],
+    settings: {},
+    provider: 'baidu',
+    filter: '',
+    timer: null,
+    openTask: null,
+  };
+
+  /* ---------------- HTTP ---------------- */
+  async function api(path, opt = {}) {
+    const res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opt,
+    });
+    let j = null;
+    try { j = await res.json(); } catch { /* 非 JSON */ }
+    if (!res.ok || !j || j.ok === false) {
+      throw new Error((j && j.error) || `HTTP ${res.status}`);
+    }
+    return j;
+  }
+  const post = (path, body = {}) => api(path, { method: 'POST', body: JSON.stringify(body) });
+
+  function toast(msg, kind = '') {
+    const el = document.createElement('div');
+    el.className = 'toast ' + kind;
+    el.textContent = msg;
+    $('#toasts').append(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .25s'; }, 3200);
+    setTimeout(() => el.remove(), 3500);
+  }
+
+  /* ---------------- 路由 ---------------- */
+  const TITLES = {
+    transfer: ['新建转存', '粘贴分享链接，批量存入你的网盘'],
+    tasks: ['转存任务', '实时进度 · 支持暂停 / 继续 / 取消'],
+    accounts: ['账号管理', '保存你自己的登录态（仅本机）'],
+    settings: ['设置', '任务引擎与限速参数'],
+    about: ['关于', '版本与免责声明'],
+  };
+
+  function go(view) {
+    $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    $$('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + view));
+    const [t, c] = TITLES[view] || ['', ''];
+    $('#pageTitle').textContent = t;
+    $('#pageCrumb').textContent = c;
+    location.hash = view;
+    if (view === 'tasks') loadTasks();
+    if (view === 'accounts') { loadAccounts(); }
+    if (view === 'settings') loadSettings();
+  }
+
+  /* ---------------- 网盘 ---------------- */
+  function providerInfo(name) {
+    return S.meta.providers.find(p => p.name === name) || { name, label: name, color: '#666', short: name.slice(0, 2) };
+  }
+
+  function renderDrives() {
+    const box = $('#drives');
+    box.innerHTML = '';
+    S.meta.providers.forEach(p => {
+      const d = document.createElement('div');
+      d.className = 'drive' + (p.name === S.provider ? ' active' : '');
+      d.dataset.name = p.name;
+      d.innerHTML = `
+        <div class="ico" style="background:${esc(p.color || '#666')}">${esc(p.short || p.name.slice(0, 2))}</div>
+        <div>
+          <div class="t">${esc(p.label)}</div>
+          <div class="s">${p.ready ? '已就绪' : '待配置规格'}</div>
+        </div>`;
+      d.onclick = () => { S.provider = p.name; renderDrives(); syncAccountSelect(); countLinks(); };
+      box.append(d);
+    });
+    const cur = providerInfo(S.provider);
+    $('#driveHint').textContent = cur.ready
+      ? `${cur.label} 接口已就绪`
+      : `${cur.label} 接口待配置（见 docs/spec/${cur.name}.md §3–§5），可先用「演示模式」跑通流程`;
+  }
+
+  function countLinks() {
+    const text = $('#links').value.trim();
+    const n = text ? text.split(/\s+/).filter(Boolean).length : 0;
+    $('#linkCount').textContent = `${n} 条链接`;
+  }
+
+  /* ---------------- 账号 ---------------- */
+  async function loadAccounts() {
+    const { accounts } = await api('/api/accounts');
+    S.accounts = accounts;
+    const tb = $('#accBody');
+    tb.innerHTML = '';
+    $('#accEmpty').hidden = accounts.length > 0;
+    accounts.forEach(a => {
+      const p = providerInfo(a.provider);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><span class="pill">${esc(p.label)}</span></td>
+        <td>${esc(a.name || '-')}</td>
+        <td class="muted">${new Date(a.created_at * 1000).toLocaleString('zh-CN')}</td>
+        <td class="row">
+          <button class="ghost sm" data-act="check">检测</button>
+          <button class="ghost sm" data-act="use">用于转存</button>
+          <button class="danger sm" data-act="del">删除</button>
+        </td>`;
+      tr.querySelector('[data-act="check"]').onclick = async () => {
+        toast('正在检测 ' + p.label + ' 登录态…');
+        try {
+          const r = await post(`/api/accounts/${a.id}/check`);
+          toast(r.message || (r.ok ? '登录态有效' : '登录态无效'), r.valid ? 'ok' : 'bad');
+        } catch (e) { toast(e.message, 'bad'); }
+      };
+      tr.querySelector('[data-act="use"]').onclick = () => {
+        S.provider = a.provider;
+        renderDrives();
+        syncAccountSelect();
+        $('#accountSel').value = String(a.id);
+        go('transfer');
+        toast('已选择：' + (a.name || p.label));
+      };
+      tr.querySelector('[data-act="del"]').onclick = async () => {
+        if (!confirm(`删除 ${p.label} 的登录态「${a.name || a.id}」？`)) return;
+        await fetch(`/api/accounts/${a.id}`, { method: 'DELETE' });
+        loadAccounts(); syncAccountSelect();
+        toast('已删除', 'ok');
+      };
+      tb.append(tr);
+    });
+    syncAccountSelect();
+  }
+
+  function syncAccountSelect() {
+    const sel = $('#accountSel');
+    const list = S.accounts.filter(a => a.provider === S.provider);
+    sel.innerHTML = '<option value="">（不使用已保存账号，手动填写）</option>';
+    list.forEach(a => sel.append(new Option(a.name || `${providerInfo(a.provider).label} #${a.id}`, String(a.id))));
+    if (list.length) sel.value = String(list[0].id);
+    const has = list.length > 0;
+    $('#cred').style.display = has && sel.value ? 'none' : 'block';
+  }
+
+  async function saveAccount() {
+    const provider = $('#accProvider').value;
+    const name = $('#accName').value.trim();
+    const credential = $('#accCookie').value.trim();
+    if (!credential) { note('#accHint', 'Cookie 不能为空', true); return; }
+    try {
+      await post('/api/accounts', { provider, name, credential });
+      $('#accCookie').value = ''; $('#accName').value = '';
+      note('#accHint', '已保存');
+      loadAccounts();
+      toast('登录态已保存', 'ok');
+    } catch (e) { note('#accHint', e.message, true); }
+  }
+
+  /* ---------------- 解析 / 建任务 ---------------- */
+  async function doParse() {
+    const text = $('#links').value;
+    try {
+      const r = await post('/api/parse', { provider: S.provider, text });
+      const card = $('#previewCard');
+      const body = $('#previewBody');
+      body.innerHTML = '';
+      $('#previewHint').textContent = `识别到 ${r.count} 个分享`;
+      r.refs.forEach(x => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><span class="pill">${esc(providerInfo(x.provider).label)}</span></td>
+          <td class="mono">${esc(x.share_id)}</td>
+          <td>${x.passcode ? esc(x.passcode) : '<span class="muted">无</span>'}</td>
+          <td class="mono muted">${esc(x.url)}</td>`;
+        body.append(tr);
+      });
+      card.hidden = r.count === 0;
+      note('#hint', r.count ? `解析到 ${r.count} 个分享，可以开始转存` : '没有识别到该网盘的分享链接', r.count === 0);
+    } catch (e) { note('#hint', e.message, true); }
+  }
+
+  async function createTask() {
+    const btn = $('#btnCreate');
+    const body = {
+      provider: S.provider,
+      links: $('#links').value,
+      target: $('#target').value.trim() || '/PanTransfer',
+    };
+    const accId = $('#accountSel').value;
+    if (accId) body.account_id = Number(accId);
+    else body.credential = $('#cred').value;
+
+    btn.disabled = true;
+    try {
+      const r = await post('/api/tasks', body);
+      note('#hint', '已创建任务 ' + r.id + '，可在「转存任务」查看');
+      toast('任务已创建', 'ok');
+      $('#links').value = ''; countLinks(); $('#previewCard').hidden = true;
+      await loadTasks();
+      setBadge();
+    } catch (e) { note('#hint', e.message, true); }
+    finally { btn.disabled = false; }
+  }
+
+  const note = (sel, msg, bad) => {
+    const el = $(sel);
+    el.textContent = msg || '';
+    el.classList.toggle('bad', !!bad);
+  };
+
+  /* ---------------- 任务 ---------------- */
+  const STATUS = {
+    pending: ['排队中', 'wait'], resolving: ['解析链接', 'run'], listing: ['读取目录', 'run'],
+    transferring: ['转存中', 'run'], verifying: ['校验中', 'run'], done: ['已完成', 'ok'],
+    failed: ['失败', 'bad'], paused: ['已暂停', 'wait'], canceled: ['已取消', 'bad'],
+  };
+  const pill = (s) => {
+    const [txt, cls] = STATUS[s] || [s, ''];
+    return `<span class="pill ${cls}">${esc(txt)}</span>`;
+  };
+  const isRunning = (s) => ['pending', 'resolving', 'listing', 'transferring', 'verifying'].includes(s);
+
+  async function loadTasks() {
+    const { tasks } = await api('/api/tasks?limit=200');
+    S.tasks = tasks;
+    const tb = $('#taskBody');
+    tb.innerHTML = '';
+    const list = S.filter ? tasks.filter(t => S.filter === 'running' ? isRunning(t.status) : t.status === S.filter) : tasks;
+    $('#taskEmpty').hidden = list.length > 0;
+    $('#taskEmpty').textContent = tasks.length ? '没有符合筛选条件的任务' : '还没有任务。去「新建转存」粘贴几个链接试试。';
+
+    list.forEach(t => {
+      const p = providerInfo(t.provider);
+      const pct = t.total ? Math.round((t.done + t.failed) * 100 / t.total) : 0;
+      const tr = document.createElement('tr');
+      tr.className = 'clickable';
+      tr.innerHTML = `
+        <td class="mono">${esc(t.id)}</td>
+        <td><span class="pill" style="border-color:${esc(p.color)}55;color:${esc(p.color)}">${esc(p.label)}</span></td>
+        <td>${pill(t.status)}${t.error ? `<div class="muted" style="color:#f0a29c;margin-top:3px">${esc(t.error)}</div>` : ''}</td>
+        <td>
+          <div class="muted">${t.done}/${t.total}${t.failed ? ` · 失败 ${t.failed}` : ''}</div>
+          <div class="bar"><i style="width:${pct}%"></i></div>
+        </td>
+        <td class="mono muted">${esc(t.target)}</td>
+        <td class="row">
+          ${isRunning(t.status) || t.status === 'paused'
+            ? `<button class="ghost sm" data-a="toggle">${t.status === 'paused' ? '继续' : '暂停'}</button>` : ''}
+          ${t.status === 'failed' ? '<button class="ghost sm" data-a="retry">重试</button>' : ''}
+          <button class="danger sm" data-a="del">删除</button>
+        </td>`;
+      tr.onclick = (e) => { if (!e.target.closest('button')) openDrawer(t.id); };
+      const toggle = tr.querySelector('[data-a="toggle"]');
+      if (toggle) toggle.onclick = async () => {
+        const act = t.status === 'paused' ? 'resume' : 'pause';
+        await post(`/api/tasks/${t.id}/${act}`);
+        loadTasks();
+      };
+      const retry = tr.querySelector('[data-a="retry"]');
+      if (retry) retry.onclick = async () => {
+        await post(`/api/tasks/${t.id}/retry`);
+        toast('已重新排队', 'ok'); loadTasks();
+      };
+      tr.querySelector('[data-a="del"]').onclick = async () => {
+        if (!confirm('删除任务记录 ' + t.id + '？（不影响已转存的文件）')) return;
+        await fetch(`/api/tasks/${t.id}`, { method: 'DELETE' });
+        loadTasks(); loadStats();
+      };
+      tb.append(tr);
+    });
+
+    const active = tasks.filter(t => isRunning(t.status)).length;
+    $('#navBadge').hidden = active === 0;
+    $('#navBadge').textContent = String(active);
+    loadStats();
+  }
+
+  async function loadStats() {
+    try {
+      const s = await api('/api/stats');
+      $('#stRunning').textContent = s.running;
+      $('#stDone').textContent = s.done;
+      $('#stFailed').textContent = s.failed;
+      $('#stFiles').textContent = s.files;
+    } catch { /* 忽略轮询错误 */ }
+  }
+
+  function setBadge() { /* loadTasks 内已维护 */ }
+
+  async function openDrawer(id) {
+    const { task } = await api('/api/tasks/' + id);
+    S.openTask = id;
+    $('#drawerTitle').textContent = `任务 ${task.id} · ${providerInfo(task.provider).label}`;
+    const pct = task.total ? Math.round((task.done + task.failed) * 100 / task.total) : 0;
+    const okN = task.items.filter(i => i.status === 'done').length;
+    const badN = task.items.filter(i => i.status === 'failed').length;
+    const rows = task.items.map((i, n) => `
+      <tr>
+        <td class="mono" style="color:var(--dim)">${n + 1}</td>
+        <td class="mono">${esc(i.src)}</td>
+        <td class="muted">${fmtSize(i.size)}</td>
+        <td>${i.status === 'done' ? '<span class="pill ok">成功</span>' : '<span class="pill bad">失败</span>'}</td>
+      </tr>`).join('');
+    $('#drawerBody').innerHTML = `
+      <div class="kv" style="margin-bottom:14px">
+        <div class="k">状态</div><div>${pill(task.status)}</div>
+        <div class="k">进度</div><div>${task.done}/${task.total}${task.failed ? ` · 失败 ${task.failed}` : ''}（${pct}%）</div>
+        <div class="k">目标目录</div><div class="mono">${esc(task.target)}</div>
+        <div class="k">创建时间</div><div>${new Date(task.created_at * 1000).toLocaleString('zh-CN')}</div>
+        ${task.error ? `<div class="k">错误</div><div style="color:#f0a29c">${esc(task.error)}</div>` : ''}
+      </div>
+      <div class="bar" style="margin-bottom:14px"><i style="width:${pct}%"></i></div>
+      <div class="muted" style="margin-bottom:8px">文件明细 · 成功 ${okN} / 失败 ${badN}</div>
+      ${task.items.length
+        ? `<table class="tb"><thead><tr><th style="width:34px">#</th><th>源路径</th><th style="width:80px">大小</th><th style="width:70px">结果</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<div class="empty">还没有文件明细</div>'}`;
+    $('#mask').classList.add('on');
+    $('#drawer').classList.add('on');
+  }
+
+  function closeDrawer() {
+    $('#mask').classList.remove('on');
+    $('#drawer').classList.remove('on');
+    S.openTask = null;
+  }
+
+  const fmtSize = (n) => {
+    if (!n) return '-';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
+  };
+
+  /* ---------------- 设置 ---------------- */
+  async function loadSettings() {
+    const { settings } = await api('/api/settings');
+    S.settings = settings;
+    $('#setConcurrency').value = settings.concurrency ?? 2;
+    $('#setQps').value = settings.qps ?? 0.8;
+    $('#setRetries').value = settings.retries ?? 3;
+    $('#setTarget').value = settings.default_target ?? '/PanTransfer';
+    $('#target').value = settings.default_target ?? '/PanTransfer';
+  }
+
+  async function saveSettings() {
+    try {
+      await post('/api/settings', {
+        concurrency: Number($('#setConcurrency').value),
+        qps: Number($('#setQps').value),
+        retries: Number($('#setRetries').value),
+        default_target: $('#setTarget').value.trim() || '/PanTransfer',
+      });
+      note('#setHint', '已保存（并发与限速在下一个任务生效）');
+      toast('设置已保存', 'ok');
+    } catch (e) { note('#setHint', e.message, true); }
+  }
+
+  /* ---------------- 启动 ---------------- */
+  async function boot() {
+    try {
+      const meta = await api('/api/meta');
+      S.meta = meta;
+      $('#footVer').textContent = 'v' + meta.version;
+      $('#aboutVer').textContent = 'v' + meta.version;
+      if (!meta.providers.some(p => p.name === S.provider)) S.provider = meta.providers[0]?.name || 'mock';
+    } catch (e) {
+      $('#svc').classList.add('bad');
+      $('#svc').lastElementChild.textContent = '服务异常';
+      toast('无法连接后端：' + e.message, 'bad');
+    }
+    renderDrives();
+    const sel = $('#accProvider');
+    sel.innerHTML = '';
+    S.meta.providers.filter(p => p.name !== 'mock')
+      .forEach(p => sel.append(new Option(p.label, p.name)));
+
+    await Promise.allSettled([loadAccounts(), loadTasks(), loadSettings()]);
+
+    $$('.nav-item').forEach(n => n.onclick = () => go(n.dataset.view));
+    $('#links').oninput = countLinks;
+    $('#btnParse').onclick = doParse;
+    $('#btnClear').onclick = () => { $('#links').value = ''; countLinks(); $('#previewCard').hidden = true; note('#hint', ''); };
+    $('#btnCreate').onclick = createTask;
+    $('#btnTemp').onclick = () => {
+      const el = $('#cred');
+      el.style.display = el.style.display === 'none' ? 'block' : 'none';
+      if (el.style.display === 'block') el.focus();
+    };
+    $('#accountSel').onchange = () => {
+      const has = S.accounts.some(a => String(a.id) === $('#accountSel').value);
+      $('#cred').style.display = haveManual() || !has ? 'block' : 'none';
+    };
+    $('#btnSaveAcc').onclick = saveAccount;
+    $('#btnSaveSet').onclick = saveSettings;
+    $('#btnRefresh').onclick = () => { loadTasks(); toast('已刷新'); };
+    $('#taskFilter').onchange = () => { S.filter = $('#taskFilter').value; loadTasks(); };
+    $('#mask').onclick = closeDrawer;
+    $('#drawerClose').onclick = closeDrawer;
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+
+    const view = (location.hash || '').replace('#', '');
+    go(TITLES[view] ? view : 'transfer');
+    countLinks();
+
+    clearInterval(S.timer);
+    S.timer = setInterval(() => {
+      loadTasks().catch(() => {});
+      if (S.openTask) openDrawer(S.openTask).catch(() => {});
+    }, 1500);
+  }
+
+  function haveManual() {
+    return $('#cred').value.trim().length > 0;
+  }
+
+  boot();
+})();

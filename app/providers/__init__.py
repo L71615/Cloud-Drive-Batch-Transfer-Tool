@@ -23,10 +23,22 @@ def names() -> list[str]:
     return sorted(REGISTRY)
 
 
+def apply_dev_gateway(base: str) -> None:
+    """把三个真实 provider 指向本地假网盘（tools/mock_netdisk.py）。
+
+    仅用于离线联调与演示：`python run.py --gateway http://127.0.0.1:8899`。
+    真实使用时不要设置，BASE 默认是各网盘的正式域名。
+    """
+    base = base.rstrip("/")
+    REGISTRY["baidu"].BASE = base + "/baidu"
+    REGISTRY["quark"].BASE = base + "/cd"
+    REGISTRY["uc"].BASE = base + "/cd"
+
+
 # 导入即注册
 from . import mock, baidu, quark, uc  # noqa: E402,F401
 
 __all__ = [
-    "REGISTRY", "register", "create", "names",
+    "REGISTRY", "register", "create", "names", "apply_dev_gateway",
     "Provider", "ProviderError", "ProviderNotReady", "ShareRef", "Entry", "TransferResult",
 ]

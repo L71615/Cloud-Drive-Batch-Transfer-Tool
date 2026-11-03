@@ -28,13 +28,14 @@ from urllib.parse import urlparse, parse_qs
 from . import __version__
 from .db import Store, now
 from .providers import create, names
-from .providers.base import ProviderError, ProviderNotReady
+from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 from .tasks import TaskRunner
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-TASK_ACTION = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)/(pause|resume|cancel)$")
+TASK_ACTION = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)/(pause|resume|cancel|retry)$")
 TASK_ONE = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)$")
 ACCOUNT_ONE = re.compile(r"^/api/accounts/(\d+)$")
+ACCOUNT_CHECK = re.compile(r"^/api/accounts/(\d+)/check$")
 
 
 class App:
@@ -101,6 +102,10 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 self.app.store.run("DELETE FROM accounts WHERE id=?", (int(m.group(1)),))
                 return self._send(200, {"ok": True})
+            m = TASK_ONE.match(u.path)
+            if m:
+                self.app.runner.delete(m.group(1))
+                return self._send(200, {"ok": True})
             self._err(404, "not found")
         except Exception as e:  # noqa: BLE001
             self._err(500, f"{type(e).__name__}: {e}")
@@ -120,6 +125,16 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/providers":
             return self._send(200, {"ok": True, "providers": self._provider_caps()})
+        if path == "/api/meta":
+            return self._send(200, {
+                "ok": True,
+                "version": __version__,
+                "providers": self._provider_caps(),
+            })
+        if path == "/api/stats":
+            return self._send(200, {"ok": True, **self.app.runner.stats()})
+        if path == "/api/settings":
+            return self._send(200, {"ok": True, "settings": self.app.runner.settings()})
         if path == "/api/accounts":
             rows = self.app.store.all(
                 "SELECT id,provider,name,created_at FROM accounts ORDER BY id DESC"
@@ -144,6 +159,27 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path
         body = self._body()
 
+        if path == "/api/settings":
+            return self._send(200, {"ok": True, "settings": self.app.runner.update_settings(body)})
+
+        m = ACCOUNT_CHECK.match(path)
+        if m:
+            row = self.app.store.one(
+                "SELECT provider,credential FROM accounts WHERE id=?", (int(m.group(1)),)
+            )
+            if not row:
+                return self._err(404, "account not found")
+            try:
+                prov = create(row["provider"], row["credential"])
+                result = prov.check_auth()
+            except ProviderNotReady as e:
+                result = {"valid": False, "message": str(e)}
+            except (ProviderError, AuthExpired) as e:
+                result = {"valid": False, "message": f"请求失败：{e}"}
+            except Exception as e:  # noqa: BLE001
+                result = {"valid": False, "message": f"{type(e).__name__}: {e}"}
+            return self._send(200, {"ok": True, **result})
+
         if path == "/api/accounts":
             provider = str(body.get("provider") or "")
             cred = str(body.get("credential") or "").strip()
@@ -155,7 +191,8 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT INTO accounts(provider,name,credential,created_at) VALUES(?,?,?,?)",
                 (provider, str(body.get("name") or provider), cred, now()),
             )
-            return self._send(200, {"ok": True})
+            row = self.app.store.one("SELECT id FROM accounts ORDER BY id DESC LIMIT 1") or {}
+            return self._send(200, {"ok": True, "id": row.get("id")})
 
         if path == "/api/parse":
             provider = str(body.get("provider") or "")
@@ -203,10 +240,10 @@ class Handler(BaseHTTPRequestHandler):
         out = []
         for name in names():
             try:
-                p = create(name, "")
-                out.append({"name": name, "caps": p.caps})
+                out.append(create(name, "").describe())
             except Exception as e:  # noqa: BLE001
-                out.append({"name": name, "error": str(e)})
+                out.append({"name": name, "label": name, "color": "#666", "short": name[:2],
+                            "ready": False, "error": str(e)})
         return out
 
     def _static(self, rel: str):

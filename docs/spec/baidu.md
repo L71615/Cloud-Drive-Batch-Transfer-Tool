@@ -1,72 +1,96 @@
-# 百度网盘 · 协议规格
+# 百度网盘协议规格（v0.2）
 
-> 状态：**未填写**。填完 §3 §4 §5 并把端点写进 `app/providers/baidu.py` 的 `API`，
-> `provider = "baidu"` 的任务才能跑通。
+> 状态：**已实现，待实机校验**。下列字段来自公开接口行为的取证整理，实现代码在
+> `app/providers/baidu.py`。凡是还没用真实账号跑过的行，都在 §9 里列着。
 
 ## §1 登录态
 
-| 项 | 值 |
-|---|---|
-| 必需 Cookie 字段 | `BDUSS`（其余？） |
-| 失效判定 | 待填（HTTP 状态 / 错误码 / 响应字段） |
-| 测试方法 | 浏览器登录后，在 Network 面板复制 Cookie 头 |
+- 形式：浏览器 Cookie 字符串，最少包含 `BDUSS=`；带 `STOKEN=` 时可做更多操作。
+- 客户端原样放进 `Cookie` 请求头，不做任何改写（`app/providers/_http.py`）。
+- 失效判定：HTTP 401/403，或 JSON `errno` 属于登录态类错误（见 §8）。
 
 ## §2 请求头
 
-| Header | 值 | 是否必需 |
-|---|---|---|
-| User-Agent | 浏览器 UA | 待确认 |
-| Referer | `https://pan.baidu.com/` | 待确认 |
-| 其它 | 待填 | |
+| 头 | 值 |
+| --- | --- |
+| User-Agent | 桌面 Chrome UA（`_http.UA`） |
+| Referer | `https://pan.baidu.com/` |
+| Cookie | 用户自己的 Cookie |
 
-## §3 分享校验
+公共查询参数：`channel=chunlei&web=1&app_id=250528&clienttype=0`。
 
-- 端点：`待填`
-- 入参：`surl`（分享 ID）、`pwd`（提取码）
-- 出参：会话 token 字段名 `待填`
-- 提取码错误的返回形态：`待填`
+## §3 分享元信息与提取码
+
+1. 分享短链 `https://pan.baidu.com/s/<surl>`，`surl` 即分享 id。
+2. `GET /api/shorturlinfo?shorturl=<surl>` → `{errno, shareid, uk}`。
+   - `shareid`、`uk` 缺一即视为分享失效。
+3. 有提取码时：`POST /share/verify?surl=<surl>&channel=chunlei&web=1&app_id=250528&clienttype=0`
+   （表单 `pwd=<提取码>&vcode=&vcode_str=`）→ `{errno, randsk}`。
+4. `sekey` = `randsk` 的 URL 解码值，后续转存必须带上。
+
+提取码来源：链接里的 `?pwd=xxxx`、文本里的 `提取码: xxxx` / `密码：xxxx`，四位字母数字。
 
 ## §4 列目录
 
-- 端点：`待填`
-- 入参：`shorturl` / `dir` / `page` / `num` / `pwd`
-- 分页：`page` 从 `1` 开始？总数字段 `待填`
-- 响应 → `Entry` 映射：
+`GET /share/list?uk=&shareid=&order=other&desc=1&showempty=0&page=<n>&num=100&dir=<路径>&t=0&bdstoken=`
 
-| Entry 字段 | 响应字段 |
-|---|---|
-| `path` | `待填`（含父目录拼接规则） |
-| `size` | `待填` |
-| `digest` | `待填`（fs_id？md5？） |
+响应 `list[]` 字段映射到 `Entry`：
 
-- 子目录：需要递归吗？`待填`
+| 接口字段 | Entry | 说明 |
+| --- | --- | --- |
+| `server_filename` | `path` | 与父路径拼成完整路径 |
+| `size` | `size` | 目录为 0 |
+| `md5` | `digest` | 仅文件 |
+| `fs_id` | `meta["fs_id"]` | 转存必需 |
+| `isdir` | — | 1 时递归展开 |
+| `path` | — | 子目录绝对路径，用于继续翻页 |
+
+- 分页：返回条数 `< 100` 即最后一页。
+- 递归：BFS，深度上限 8，总条目上限 5000。
 
 ## §5 转存
 
-- 端点：`待填`
-- 入参：`fsidlist`（逗号分隔？单次上限？）、`path`
-- 成功形态：`待填`
-- 已存在同名的返回：`待填`
-- 容量不足的返回：`待填`
+`POST /share/transfer?shareid=&from=<uk>&sekey=<sekey>&ondup=newcopy&async=1&channel=chunlei&web=1&app_id=250528&clienttype=0`
 
-## §6 目标目录与容量
+- 表单：`fsidlist=[<fs_id>,...]`（JSON 数组字符串）、`path=<目标目录绝对路径>`。
+- 成功：`{errno:0, extra:{list:[{from, to}]}}`，`to` 即落盘路径；没有 `to` 时按
+  `<目标目录>/<文件名>` 推断。
+- 目标目录不存在时先建目录（§6）。
 
-- 列出目录：`待填`（用于校验目标目录存在、自动创建）
-- 配额查询：`待填`
+## §6 目录与容量
+
+- 列目录：`GET /api/list?dir=<路径>&order=name&num=100&page=1`（同上公有参数）
+- 建目录：`POST /api/create?a=commit`，表单 `path=<绝对路径>&isdir=1&block_list=[]&size=0`
+- 容量：`GET /api/quota?checkfree=1&checkexpire=1`
 
 ## §7 去重
 
-同名同哈希时：跳过 / 覆盖 / 重命名 `待确认`
+首版不做服务端去重：`ondup=newcopy` 表示重名自动生成副本，避免覆盖用户已有文件。
+本地去重键为 `items(task_id, src)`，同一任务内同一源路径只转一次（断点续跑依赖它）。
 
-## §8 限速与错误码
+## §8 错误码
 
-| 错误码 | 含义 | 处理 |
-|---|---|---|
-| `待填` | 频率限制 | 退避重试 |
-| `待填` | 登录失效 | `AuthExpired`，提示重新扫码 |
+| errno | 含义 | 处理 |
+| --- | --- | --- |
+| 0 | 成功 | — |
+| 2 | 参数错误 | 直接失败，提示查规格 |
+| -6 | 需要验证（风控） | 失败，提示降速后重试 |
+| -7 | 文件名非法 | 失败 |
+| -9 | 提取码错误 | 失败 |
+| -62 | 分享已失效 | 失败 |
+| 4 | 请求过于频繁 | 失败，建议调低 QPS |
+| 12 | 文件已存在 | 视为成功（建目录时） |
+| 111 | 空间不足 | 失败 |
+| 112 | 转存数量超限 | 失败 |
+| 31066 | 文件不存在 | 失败 |
 
-实测安全 QPS：`待填`（默认 0.8）
+未收录的码：原样带 `errno` 抛出，便于继续补表。
 
-## §9 未知项
+## §9 待实机校验
 
-- 待填
+- [ ] `shorturlinfo` 在带提取码分享上是否直接返回 `randsk`（当前实现总是走 verify）。
+- [ ] `share/list` 的 `dir` 是否需要与 `uk` 同源（跨账号转存场景）。
+- [ ] 转存返回 `extra.list` 是否逐文件一一对应（已按一一对应实现）。
+- [ ] `api/create` 对已存在目录返回 12 还是 0。
+- [ ] 大目录（>1000 项）分页稳定性与 `t` 参数是否需要逐页变化。
+- [ ] 风控触发条件与最小安全 QPS（当前默认 0.8）。

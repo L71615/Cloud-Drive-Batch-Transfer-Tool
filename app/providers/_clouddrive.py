@@ -1,0 +1,220 @@
+# -*- coding: utf-8 -*-
+"""云盘类接口的共享实现（夸克 / UC 同构）。
+
+设计要点：
+- 端点、参数、字段映射都来自 docs/spec/*.md，这里只做"把规格翻译成代码"。
+- 子类只需要给 BASE / PR / REFERER / 链接正则。
+- 目录树用 BFS 展开，限制深度与总数，避免循环分享把内存打满。
+- 转存是异步的：save 返回 task_id，必须轮询 /task 到结束才算成功。
+"""
+from __future__ import annotations
+
+import time
+
+from ._http import Client
+from .base import Entry, Provider, ProviderError, ProviderNotReady, ShareRef
+
+MAX_DEPTH = 8
+MAX_ENTRIES = 5000
+
+ERR_OK = (0, 200, None)
+
+
+class CloudDrive(Provider):
+    """夸克/UC 的通用实现。"""
+
+    BASE = ""
+    PR = "ucpro"
+    FR = "pc"
+    REFERER = ""
+
+    # 端点（相对 BASE），子类可覆盖
+    P_TOKEN = "/1/clouddrive/share/sharepage/token"
+    P_DETAIL = "/1/clouddrive/share/sharepage/detail"
+    P_SAVE = "/1/clouddrive/share/sharepage/save"
+    P_TASK = "/1/clouddrive/task"
+    P_SORT = "/1/clouddrive/file/sort"
+    P_FILE = "/1/clouddrive/file"
+    P_MEMBER = "/1/clouddrive/member"
+
+    def __init__(self, credential: str = ""):
+        super().__init__(credential)
+        self._client: Client | None = None
+        self._stoken: dict[str, str] = {}
+        self._dirs: dict[str, str] = {}
+
+    # ---------------- 基础设施 ----------------
+    @property
+    def ready(self) -> bool:
+        return bool(self.BASE)
+
+    def _c(self) -> Client:
+        if not self.ready:
+            raise ProviderNotReady(f"{self.label}：端点未配置")
+        if self._client is None:
+            self._client = Client(self.name, self.credential, self.qps, referer=self.REFERER)
+        return self._client
+
+    def _api(self, path: str, method: str = "GET", params: dict | None = None,
+             body: dict | None = None) -> dict:
+        q = {"pr": self.PR, "fr": self.FR}
+        if params:
+            q.update({k: v for k, v in params.items() if v not in (None, "")})
+        data = self._c().request(method, self.BASE + path, params=q, body=body)
+        if not isinstance(data, dict):
+            raise ProviderError(f"{self.name}: 响应不是 JSON")
+        status = data.get("status")
+        if status not in ERR_OK:
+            code = data.get("code")
+            msg = data.get("message") or "接口返回错误"
+            if code in (31001, 31023, 401) or status in (401, -1):
+                from .base import AuthExpired
+                raise AuthExpired(f"{self.name}: {msg}（code={code}）")
+            raise ProviderError(f"{self.name}: {msg}（status={status} code={code}）")
+        return data.get("data") or {}
+
+    # ---------------- 分享 ----------------
+    def share_token(self, ref: ShareRef) -> str:
+        if ref.share_id in self._stoken:
+            return self._stoken[ref.share_id]
+        d = self._api(self.P_TOKEN, "POST", body={
+            "pwd_id": ref.share_id,
+            "passcode": ref.passcode or "",
+        })
+        stoken = d.get("stoken")
+        if not stoken:
+            raise ProviderError("没能拿到 stoken：提取码错误或分享已失效")
+        self._stoken[ref.share_id] = stoken
+        return stoken
+
+    def _page_share(self, ref: ShareRef, stoken: str, pdir: str, page: int, size: int = 50) -> dict:
+        return self._api(self.P_DETAIL, params={
+            "pwd_id": ref.share_id, "stoken": stoken, "pdir_fid": pdir, "force": "0",
+            "_page": page, "_size": size,
+            "_fetch_banner": "0", "_fetch_share": "0", "_fetch_total": "1",
+            "_sort": "file_type:asc,file_name:asc",
+        })
+
+    def list_share(self, ref: ShareRef) -> list[Entry]:
+        stoken = self.share_token(ref)
+        out: list[Entry] = []
+        queue: list[tuple[str, str, int]] = [("0", "", 0)]
+        while queue and len(out) < MAX_ENTRIES:
+            pdir, prefix, depth = queue.pop(0)
+            if depth > MAX_DEPTH:
+                continue
+            page = 1
+            while True:
+                d = self._page_share(ref, stoken, pdir, page)
+                for it in d.get("list") or []:
+                    name = str(it.get("file_name") or "")
+                    path = f"{prefix}/{name}" if prefix else f"/{name}"
+                    if it.get("dir"):
+                        queue.append((str(it.get("fid")), path, depth + 1))
+                        continue
+                    out.append(Entry(
+                        path=path,
+                        size=int(it.get("size") or 0),
+                        digest=str(it.get("fid") or ""),
+                        meta={"fid": it.get("fid"), "token": it.get("share_fid_token")},
+                    ))
+                    if len(out) >= MAX_ENTRIES:
+                        break
+                total = int((d.get("metadata") or {}).get("_total") or 0)
+                if not total or page * 50 >= total:
+                    break
+                page += 1
+        return out
+
+    # ---------------- 我的目录 ----------------
+    def _children(self, pdir: str, size: int = 200) -> list[dict]:
+        d = self._api(self.P_SORT, params={
+            "pdir_fid": pdir, "_page": 1, "_size": size,
+            "_fetch_total": "1", "_sort": "file_type:asc,file_name:asc",
+        })
+        return d.get("list") or []
+
+    def ensure_dir(self, path: str) -> str:
+        """把 /a/b/c 逐级创建出来，返回最终目录 fid。"""
+        fid = "0"
+        for seg in [s for s in str(path or "").split("/") if s]:
+            key = f"{fid}/{seg}"
+            if key in self._dirs:
+                fid = self._dirs[key]
+                continue
+            found = ""
+            for ch in self._children(fid):
+                if ch.get("dir") and str(ch.get("file_name")) == seg:
+                    found = str(ch.get("fid"))
+                    break
+            if not found:
+                d = self._api(self.P_FILE, "POST", body={
+                    "pdir_fid": fid, "file_name": seg,
+                    "dir_path": "", "dir_init_lock": False,
+                })
+                found = str(d.get("fid") or "")
+                if not found:
+                    raise ProviderError(f"创建目录失败：{seg}")
+            self._dirs[key] = found
+            fid = found
+        return fid
+
+    # ---------------- 转存 ----------------
+    def transfer(self, ref: ShareRef, entry: Entry, target: str) -> str:
+        stoken = self.share_token(ref)
+        dest = self.ensure_dir(target)
+        d = self._api(self.P_SAVE, "POST", body={
+            "fid_list": [entry.meta.get("fid")],
+            "fid_token_list": [entry.meta.get("token")],
+            "to_pdir_fid": dest,
+            "pwd_id": ref.share_id,
+            "stoken": stoken,
+            "pdir_fid": "0",
+            "_page": 1, "_size": 50,
+            "_fetch_banner": 0, "_fetch_share": 0, "_fetch_total": 1,
+            "_sort": "file_type:asc,updated_at:desc",
+        })
+        task_id = d.get("task_id")
+        if task_id:
+            self._wait_task(str(task_id))
+        name = entry.path.rsplit("/", 1)[-1]
+        return f"{target.rstrip('/')}/{name}"
+
+    def _wait_task(self, task_id: str, timeout: float = 120.0) -> None:
+        end = time.time() + timeout
+        time.sleep(0.2)
+        while time.time() < end:
+            d = self._api(self.P_TASK, params={"task_id": task_id, "retry_index": "0"})
+            status = d.get("status")
+            if status == 2:
+                return
+            if status in (3, 4):
+                raise ProviderError(f"转存任务失败：{d.get('message') or status}")
+            time.sleep(0.5)
+        raise ProviderError("转存任务超时（120s）")
+
+    # ---------------- 其它 ----------------
+    def list_dir(self, path: str = "0") -> list[Entry]:
+        fid = path if path == "0" or path.isdigit() else self.ensure_dir(path)
+        return [
+            Entry(
+                path=f"/{ch.get('file_name')}",
+                size=int(ch.get("size") or 0),
+                digest=str(ch.get("fid") or ""),
+                meta={"fid": ch.get("fid"), "dir": bool(ch.get("dir"))},
+            )
+            for ch in self._children(fid)
+        ]
+
+    def quota(self) -> dict:
+        d = self._api(self.P_MEMBER)
+        total = int(d.get("total_capacity") or 0)
+        used = int(d.get("use_capacity") or 0)
+        return {"total": total, "used": used, "free": max(0, total - used)}
+
+    def check_auth(self) -> dict:
+        try:
+            self._children("0", size=1)
+        except ProviderNotReady as e:
+            return {"valid": False, "message": str(e)}
+        return {"valid": True, "message": "登录态有效"}

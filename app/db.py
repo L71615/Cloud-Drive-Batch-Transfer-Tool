@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS items(
     UNIQUE(task_id, src)
 );
 
+CREATE TABLE IF NOT EXISTS settings(
+    k   TEXT PRIMARY KEY,
+    v   TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_items_task ON items(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 """

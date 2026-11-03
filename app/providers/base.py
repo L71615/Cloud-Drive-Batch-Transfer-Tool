@@ -32,6 +32,7 @@ class Entry:
     path: str
     size: int = 0
     digest: str = ""
+    meta: dict = field(default_factory=dict)   # 适配器私有：fid / token / fs_id 等
 
 
 @dataclass
@@ -43,6 +44,9 @@ class TransferResult:
 
 class Provider(abc.ABC):
     name: str = "base"
+    label: str = "通用"          # 界面显示名（中文）
+    color: str = "#666666"       # 品牌色
+    short: str = "??"            # 图标里的两个字
     qps: float = 1.0
 
     def __init__(self, credential: str = ""):
@@ -52,6 +56,25 @@ class Provider(abc.ABC):
     @property
     def caps(self) -> dict:
         return {"batch": True, "dedup": False, "max_batch": 50}
+
+    @property
+    def ready(self) -> bool:
+        """端点是否已按规格配置完成。"""
+        return True
+
+    def describe(self) -> dict:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "color": self.color,
+            "short": self.short,
+            "ready": self.ready,
+            "caps": self.caps,
+        }
+
+    def check_auth(self) -> dict:
+        """用一次最轻的请求验证登录态。返回 {valid, message}。"""
+        raise ProviderNotReady(f"{self.name}: 尚未配置端点，无法检测登录态")
 
     @abc.abstractmethod
     def parse_links(self, text: str) -> list[ShareRef]:
