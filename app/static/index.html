@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PanTransfer · 批量转存</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --line:#242c36; --fg:#e6edf3; --dim:#8b98a5;
+    --accent:#4c8dff; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.3px}
+  header span{color:var(--dim);font-size:12px}
+  main{max-width:1000px;margin:0 auto;padding:24px;display:grid;
+       grid-template-columns:1fr 1fr;gap:18px}
+  @media (max-width:860px){main{grid-template-columns:1fr}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+          padding:16px}
+  section.wide{grid-column:1/-1}
+  h2{font-size:13px;margin:0 0 12px;color:var(--dim);font-weight:600;
+     text-transform:uppercase;letter-spacing:.6px}
+  label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+  input,select,textarea{width:100%;background:#0d1117;color:var(--fg);
+    border:1px solid var(--line);border-radius:7px;padding:8px 10px;
+    font:inherit;font-size:13px}
+  textarea{min-height:88px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
+  button{background:var(--accent);color:#fff;border:0;border-radius:7px;
+         padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap}
+  .hint{color:var(--dim);font-size:12px;margin-top:8px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);
+        vertical-align:top}
+  th{color:var(--dim);font-weight:500;font-size:11.5px}
+  .bar{height:5px;background:#0d1117;border-radius:3px;overflow:hidden;margin-top:5px}
+  .bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .3s}
+  .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;
+        border:1px solid var(--line)}
+  .pill.done{color:var(--ok);border-color:#1f4d2b}
+  .pill.failed{color:var(--bad);border-color:#5c2222}
+  .pill.running{color:var(--accent);border-color:#24406f}
+  .pill.paused{color:var(--warn);border-color:#4d3d13}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;
+        word-break:break-all;color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <h1>PanTransfer</h1>
+  <span>本地单机 · 无账号 · 仅用你自己的登录态</span>
+</header>
+
+<main>
+  <section>
+    <h2>新建任务</h2>
+    <label for="provider">网盘</label>
+    <select id="provider"></select>
+
+    <label for="links">分享链接（每行一个，可带提取码）</label>
+    <textarea id="links" placeholder="https://pan.baidu.com/s/xxxx?pwd=abcd&#10;https://pan.quark.cn/s/yyyy&#10;https://drive.uc.cn/s/zzzz"></textarea>
+
+    <label for="target">转存到目录</label>
+    <input id="target" value="/PanTransfer" spellcheck="false">
+
+    <label for="cred">Cookie / 登录态（留空则用已保存账号）</label>
+    <input id="cred" placeholder="BDUSS=...; STOKEN=..." spellcheck="false">
+
+    <div class="row">
+      <button id="btnParse" class="ghost">仅解析（不联网）</button>
+      <button id="btnCreate">开始转存</button>
+    </div>
+    <div class="hint" id="hint"></div>
+  </section>
+
+  <section>
+    <h2>账号</h2>
+    <div class="row">
+      <select id="accProvider" style="flex:1"></select>
+      <button id="btnSaveAcc" class="ghost">保存登录态</button>
+    </div>
+    <table id="accTable">
+      <thead><tr><th>网盘</th><th>名称</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="hint">登录态只存在本地 SQLite，不上传任何服务器。</div>
+  </section>
+
+  <section class="wide">
+    <h2>任务</h2>
+    <table id="taskTable">
+      <thead><tr><th style="width:150px">任务</th><th>状态</th><th style="width:120px">进度</th>
+      <th>目标目录</th><th style="width:190px">操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="hint" id="taskHint">尚无任务</div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const api = async (path, opt = {}) => {
+  const r = await fetch(path, {headers: {'Content-Type': 'application/json'}, ...opt});
+  const j = await r.json().catch(() => ({ok: false, error: 'bad json'}));
+  if (!j.ok) throw new Error(j.error || ('http ' + r.status));
+  return j;
+};
+const note = (el, msg, bad) => { el.textContent = msg; el.style.color = bad ? 'var(--bad)' : 'var(--dim)'; };
+
+async function loadProviders() {
+  const {providers} = await api('/api/providers');
+  const p = $('#provider'), a = $('#accProvider');
+  p.innerHTML = a.innerHTML = '';
+  providers.forEach(x => {
+    p.append(new Option(x.name, x.name));
+    a.append(new Option(x.name, x.name));
+  });
+}
+
+async function loadAccounts() {
+  const {accounts} = await api('/api/accounts');
+  const tb = $('#accTable tbody');
+  tb.innerHTML = '';
+  if (!accounts.length) {
+    tb.innerHTML = '<tr><td colspan="3" class="mono">还没有保存的账号</td></tr>';
+    return;
+  }
+  accounts.forEach(a => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${a.provider}</td><td>${a.name}</td>
+      <td><button class="ghost" data-id="${a.id}">删除</button></td>`;
+    tr.querySelector('button').onclick = async () => {
+      await fetch('/api/accounts/' + a.id, {method: 'DELETE'});
+      loadAccounts();
+    };
+    tb.append(tr);
+  });
+}
+
+const statePill = (s) => {
+  const cls = ['done'].includes(s) ? 'done'
+    : ['failed', 'canceled'].includes(s) ? 'failed'
+    : ['transferred', 'transferring', 'listing', 'resolving', 'verifying'].includes(s) ? 'running'
+    : s === 'paused' ? 'paused' : '';
+  return `<span class="pill ${cls}">${s}</span>`;
+};
+
+async function loadTasks() {
+  const {tasks} = await api('/api/tasks?limit=50');
+  const tb = $('#taskTable tbody');
+  tb.innerHTML = '';
+  if (!tasks.length) { note($('#taskHint'), '尚无任务'); return; }
+  note($('#taskHint'), `最近 ${tasks.length} 个任务`);
+  tasks.forEach(t => {
+    const pct = t.total ? Math.round((t.done + t.failed) * 100 / t.total) : 0;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="mono">${t.id}<br>${t.provider}</td>
+      <td>${statePill(t.status)}${t.error ? `<div class="mono" style="color:var(--bad)">${t.error}</div>` : ''}</td>
+      <td>${t.done}/${t.total}${t.failed ? ` <span style="color:var(--bad)">✗${t.failed}</span>` : ''}
+        <div class="bar"><i style="width:${pct}%"></i></div></td>
+      <td class="mono">${t.target}</td>
+      <td><button class="ghost" data-a="pause">暂停</button>
+          <button class="ghost" data-a="resume">继续</button>
+          <button class="ghost" data-a="cancel">取消</button></td>`;
+    tr.querySelectorAll('button').forEach(b => b.onclick = async () => {
+      await api(`/api/tasks/${t.id}/${b.dataset.a}`, {method: 'POST', body: '{}'});
+      loadTasks();
+    });
+    tb.append(tr);
+  });
+}
+
+$('#btnParse').onclick = async () => {
+  try {
+    const j = await api('/api/parse', {method: 'POST', body: JSON.stringify({
+      provider: $('#provider').value, text: $('#links').value})});
+    note($('#hint'), `解析到 ${j.count} 个分享：` + j.refs.map(r => r.share_id).join(', '));
+  } catch (e) { note($('#hint'), e.message, true); }
+};
+
+$('#btnCreate').onclick = async () => {
+  const btn = $('#btnCreate');
+  btn.disabled = true;
+  try {
+    const j = await api('/api/tasks', {method: 'POST', body: JSON.stringify({
+      provider: $('#provider').value,
+      links: $('#links').value,
+      target: $('#target').value,
+      credential: $('#cred').value
+    })});
+    note($('#hint'), '已创建任务 ' + j.id);
+    $('#links').value = '';
+    loadTasks();
+  } catch (e) { note($('#hint'), e.message, true); }
+  finally { btn.disabled = false; }
+};
+
+$('#btnSaveAcc').onclick = async () => {
+  const cred = prompt('粘贴该网盘的 Cookie / 登录态字符串：');
+  if (!cred) return;
+  try {
+    await api('/api/accounts', {method: 'POST', body: JSON.stringify({
+      provider: $('#accProvider').value, name: $('#accProvider').value, credential: cred})});
+    loadAccounts();
+  } catch (e) { alert(e.message); }
+};
+
+(async () => {
+  try {
+    await loadProviders();
+    await loadAccounts();
+    await loadTasks();
+    setInterval(loadTasks, 1200);
+  } catch (e) {
+    document.body.insertAdjacentHTML('afterbegin',
+      `<div style="padding:12px;color:#f85149">加载失败：${e.message}</div>`);
+  }
+})();
+</script>
+</body>
+</html>

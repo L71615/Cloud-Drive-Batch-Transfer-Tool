@@ -1,0 +1,31 @@
+# 运行时数据 / 本地登录态，永不入库
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 逆向与取证工作区
+orig/
+work/
+samples/
+*.exe
+*.dll
+*.msi
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
