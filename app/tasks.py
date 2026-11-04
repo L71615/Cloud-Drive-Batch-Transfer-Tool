@@ -244,6 +244,15 @@ class TaskRunner:
             if not refs:
                 raise ProviderNotReady("没有解析到分享链接，请检查粘贴内容")
 
+            # 目标目录里已有同名的文件就直接算完成：重跑、重试、重复粘贴时
+            # 不会在网盘里堆出一串 xxx(1).mp4、xxx(2).mp4
+            existing: set[str] = set()
+            try:
+                for it in prov.list_dir(task["target"]) or []:
+                    existing.add(it.path.rsplit("/", 1)[-1])
+            except Exception:  # noqa: BLE001 - 目录不存在或接口不支持都不该拖垮任务
+                existing = set()
+
             # 边读目录边转存：大分享不必等整棵树读完才开始，进度条一直在走。
             # 攒够一批再一次 save（官方接口支持 fid_list 数组），十来个文件一次请求，比逐个快很多。
             prev = self.store.all("SELECT src,status FROM items WHERE task_id=?", (task_id,))
@@ -279,6 +288,7 @@ class TaskRunner:
                     )
                     if good:
                         done += 1
+                        existing.add(e.path.rsplit("/", 1)[-1])
                     else:
                         failed += 1
                 buf.clear()
@@ -309,6 +319,22 @@ class TaskRunner:
                             "UPDATE tasks SET total=?,updated_at=? WHERE id=?", (seen, now(), task_id)
                         )
                         if entry.path in done_set:
+                            continue
+                        name = entry.path.rsplit("/", 1)[-1]
+                        if name and name in existing:
+                            done += 1
+                            self.store.run(
+                                "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                " VALUES(?,?,?,?,?,?,?)"
+                                " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
+                                " dst=excluded.dst,error=excluded.error",
+                                (task_id, entry.path, entry.size, entry.digest,
+                                 f"{task['target'].rstrip('/')}/{name}", "done", ""),
+                            )
+                            self.store.run(
+                                "UPDATE tasks SET done=?,total=?,updated_at=? WHERE id=?",
+                                (done, seen, now(), task_id),
+                            )
                             continue
                         buf.append((ref, entry))
                         if len(buf) >= BATCH_SIZE:

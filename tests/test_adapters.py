@@ -189,5 +189,48 @@ class AdapterTest(unittest.TestCase):
         self.assertIn("error", steps[1])
 
 
+    def _wait(self, runner, tid: str, timeout: float = 25.0) -> dict:
+        import time
+        end = time.time() + timeout
+        while time.time() < end:
+            v = runner.view(tid)
+            if v["status"] in ("done", "failed", "canceled"):
+                return v
+            time.sleep(0.1)
+        return runner.view(tid)
+
+    def test_task_skips_existing_names(self):
+        """Run the same share into the same folder twice: nothing should be duplicated."""
+        import os
+        import tempfile
+        from app.db import Store
+        from app.tasks import TaskRunner
+
+        tmp = tempfile.mkdtemp()
+        store = Store(os.path.join(tmp, "t.db"))
+        runner = TaskRunner(store, workers=1)
+        cred = "__pus=abc"
+        link = "https://pan.quark.cn/s/a1b2c3d4e5f6"
+        try:
+            tid = runner.create_task("quark", link, "/Dedup", cred)
+            first = self._wait(runner, tid)
+            self.assertEqual(first["status"], "done", first.get("error"))
+            n1 = first["done"]
+            self.assertGreaterEqual(n1, 2)
+
+            tid2 = runner.create_task("quark", link, "/Dedup", cred)
+            second = self._wait(runner, tid2)
+            self.assertEqual(second["status"], "done", second.get("error"))
+            self.assertEqual(second["done"], n1, "second run must count all files as done")
+            self.assertEqual(second["failed"], 0)
+
+            p = self._p(QuarkProvider, cookie=cred)
+            names = [x["name"] for x in p.browse("/Dedup")]
+            self.assertFalse([n for n in names if "(" in n], f"duplicated files: {names}")
+        finally:
+            runner.shutdown()
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

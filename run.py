@@ -4,9 +4,31 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 import threading
+import time
 import webbrowser
+
+
+def backup_db(db_path: str, keep: int = 3) -> None:
+    """启动时给库留一份快照：强杀进程时 WAL 可能没落盘，任务明细就没了。"""
+    if not os.path.exists(db_path):
+        return
+    folder = os.path.join(os.path.dirname(os.path.abspath(db_path)), "backup")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        dst = os.path.join(folder, time.strftime("pantransfer-%Y%m%d-%H%M%S.db"))
+        src = sqlite3.connect(db_path)
+        out = sqlite3.connect(dst)
+        src.backup(out)
+        out.close()
+        src.close()
+        olds = sorted(f for f in os.listdir(folder) if f.endswith(".db"))[:-keep]
+        for name in olds:
+            os.remove(os.path.join(folder, name))
+    except Exception as exc:  # noqa: BLE001 - 备份失败不影响启动
+        print(f"[warn] 数据库备份跳过：{exc}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from app.providers import apply_dev_gateway  # 延迟导入，保证 --help 不依赖包路径
     from app.http_api import serve
+
+    backup_db(args.db)
 
     if args.gateway:
         apply_dev_gateway(args.gateway)
