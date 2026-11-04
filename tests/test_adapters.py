@@ -162,6 +162,22 @@ class AdapterTest(unittest.TestCase):
         self.assertTrue(all(s["ok"] for s in steps), steps)
         self.assertIn("总", steps[-1]["detail"])
 
+    def test_quark_transfer_batch_mixed_dirs(self):
+        """子目录里的文件必须带自己的 pdir_fid，否则服务端会回「token校验异常」。
+
+        假网盘会像真服务端一样校验 fid 与 pdir_fid 同源、token 与 fid 配对。
+        """
+        p = self._p(QuarkProvider, cookie="__pus=abc")
+        ref = p.parse_links("https://pan.quark.cn/s/a1b2c3d4e5f6")[0]
+        entries = list(p.list_share(ref))
+        names = sorted(e.path for e in entries)
+        self.assertEqual(names, ["/a.txt", "/相册/c.txt"], "应递归展开子目录")
+        dsts = p.transfer_batch(ref, entries, "/混合目录")
+        self.assertEqual(len(dsts), 2)
+        self.assertTrue(all(dsts), f"两条都应转存成功：{dsts}")
+        landed = sorted(x["name"] for x in p.browse("/混合目录"))
+        self.assertEqual(landed, ["a.txt", "c.txt"])
+
     def test_quark_diagnose_reports_failure(self):
         p = self._p(QuarkProvider, cookie="__pus=abc")
         ref = p.parse_links("https://pan.quark.cn/s/zyxwvu987654")[0]

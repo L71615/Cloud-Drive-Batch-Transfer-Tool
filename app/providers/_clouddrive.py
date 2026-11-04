@@ -138,7 +138,13 @@ class CloudDrive(Provider):
                         path=path,
                         size=int(it.get("size") or 0),
                         digest=str(it.get("fid") or ""),
-                        meta={"fid": it.get("fid"), "token": it.get("share_fid_token")},
+                        meta={
+                            "fid": it.get("fid"),
+                            "token": it.get("share_fid_token"),
+                            # 转存时 pdir_fid 必须是这批文件在分享里的父目录，
+                            # 一律传 "0"（根）会被服务端判成"token 校验异常"
+                            "pdir": pdir,
+                        },
                     )
                     count += 1
                     if count >= MAX_ENTRIES:
@@ -184,45 +190,72 @@ class CloudDrive(Provider):
 
     # ---------------- 转存 ----------------
     def transfer(self, ref: ShareRef, entry: Entry, target: str) -> str:
-        stoken = self.share_token(ref)
-        dest = self.ensure_dir(target)
-        d = self._api(self.P_SAVE, "POST", body={
-            "fid_list": [entry.meta.get("fid")],
-            "fid_token_list": [entry.meta.get("token")],
-            "to_pdir_fid": dest,
-            "pwd_id": ref.share_id,
-            "stoken": stoken,
-            "pdir_fid": "0",
-            "_page": 1, "_size": 50,
-            "_fetch_banner": 0, "_fetch_share": 0, "_fetch_total": 1,
-            "_sort": "file_type:asc,updated_at:desc",
-        })
-        task_id = d.get("task_id")
-        if task_id:
-            self._wait_task(str(task_id))
-        name = entry.path.rsplit("/", 1)[-1]
-        return f"{target.rstrip('/')}/{name}"
+        res = self.transfer_batch(ref, [entry], target)
+        if not res or not res[0]:
+            raise ProviderError("转存失败")
+        return res[0]
 
-    def transfer_batch(self, ref: ShareRef, entries: list[Entry], target: str) -> list[str]:
-        """一次 save 提交多个文件（官方接口支持 fid_list 数组），比逐个转存快一个数量级。"""
-        if not entries:
-            return []
-        stoken = self.share_token(ref)
-        dest = self.ensure_dir(target)
+    def _save_group(self, ref: ShareRef, stoken: str, pdir: str,
+                    entries: list[Entry], dest: str) -> None:
+        """一次 save 提交同一个父目录下的多个文件。"""
         d = self._api(self.P_SAVE, "POST", body={
             "fid_list": [e.meta.get("fid") for e in entries],
             "fid_token_list": [e.meta.get("token") for e in entries],
             "to_pdir_fid": dest,
             "pwd_id": ref.share_id,
             "stoken": stoken,
-            "pdir_fid": "0",
+            "pdir_fid": pdir,
             "scene": "link",
         })
         task_id = d.get("task_id")
         if task_id:
             self._wait_task(str(task_id))
-        base = target.rstrip("/")
-        return [f"{base}/{e.path.rsplit('/', 1)[-1]}" for e in entries]
+
+    def transfer_batch(self, ref: ShareRef, entries: list[Entry], target: str) -> list[str]:
+        """批量转存：按"分享内的父目录"分组，一组一次 save。
+
+        服务端要求 pdir_fid 与 fid_list 同源（同一批文件必须是同一个父目录的子项），
+        否则会回 403「转存文件token校验异常」—— 之前全部传 "0" 就是这么挂的。
+        返回与 entries 等长的目标路径列表，失败的位置是空串。
+        """
+        if not entries:
+            return []
+        dest = self.ensure_dir(target)
+        groups: dict[str, list[int]] = {}
+        for idx, e in enumerate(entries):
+            groups.setdefault(str(e.meta.get("pdir") or "0"), []).append(idx)
+
+        out = [""] * len(entries)
+        first_err = ""
+        for pdir, idxs in groups.items():
+            group = [entries[i] for i in idxs]
+            stoken = self.share_token(ref)
+            try:
+                self._save_group(ref, stoken, pdir, group, dest)
+            except ProviderError as exc:
+                # token 有有效期：换一次 stoken 再试，仍然不行就逐个提交，
+                # 免得一个坏文件把整批 20 个都连坐。
+                if "token" not in str(exc) and "stoken" not in str(exc):
+                    first_err = first_err or str(exc)
+                    continue
+                self._stoken.pop(ref.share_id, None)
+                try:
+                    stoken = self.share_token(ref)
+                    self._save_group(ref, stoken, pdir, group, dest)
+                except ProviderError as exc2:
+                    first_err = first_err or str(exc2)
+                    for i, one in zip(idxs, group):
+                        try:
+                            self._save_group(ref, stoken, pdir, [one], dest)
+                        except ProviderError:
+                            continue
+                        out[i] = f"{target.rstrip('/')}/{one.path.rsplit('/', 1)[-1]}"
+                    continue
+            for i, one in zip(idxs, group):
+                out[i] = f"{target.rstrip('/')}/{one.path.rsplit('/', 1)[-1]}"
+        if not any(out) and first_err:
+            raise ProviderError(first_err)
+        return out
 
     def _wait_task(self, task_id: str, timeout: float = 120.0) -> None:
         end = time.time() + timeout

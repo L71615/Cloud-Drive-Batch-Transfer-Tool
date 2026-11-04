@@ -263,12 +263,14 @@ class TaskRunner:
                 ok, dsts, err = self._batch_with_retry(prov, ref0, batch, task["target"], cfg)
                 for idx, (_r, e) in enumerate(buf):
                     dst = dsts[idx] if ok and idx < len(dsts) else ""
+                    good = bool(dst)
                     self.store.run(
                         "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
                         " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
-                        (task_id, e.path, e.size, e.digest, dst, "done" if ok else "failed", "" if ok else err),
+                        (task_id, e.path, e.size, e.digest, dst, "done" if good else "failed",
+                         "" if good else (err or "转存失败")),
                     )
-                    if ok:
+                    if good:
                         done += 1
                     else:
                         failed += 1

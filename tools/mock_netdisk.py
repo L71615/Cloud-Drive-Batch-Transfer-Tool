@@ -179,6 +179,20 @@ class Handler(BaseHTTPRequestHandler):
             st = self.state
             dest_fid = str(body.get("to_pdir_fid") or "0")
             dpath = st.cd_fid_dir.get(dest_fid, "/")
+            # 真实服务端会校验 fid 与 pdir_fid 同源、token 与 fid 配对，
+            # 这里照做，否则"pdir_fid 恒为 0"这种 bug 在自检里看不出来
+            pdir = str(body.get("pdir_fid") or "0")
+            allowed = {str(x.get("fid")): str(x.get("share_fid_token") or "")
+                       for x in CD_TREE.get(pdir, [])}
+            fids = [str(x) for x in (body.get("fid_list") or [])]
+            tokens = [str(x) for x in (body.get("fid_token_list") or [])]
+            for i, fid in enumerate(fids):
+                want = allowed.get(fid)
+                got = tokens[i] if i < len(tokens) else ""
+                if want is None or want != got:
+                    return self._json(
+                        {"status": 403, "code": 403,
+                         "message": f"转存文件token校验异常[{got} token校验异常]"}, 403)
             dst = []
             for fid in (body.get("fid_list") or []):
                 src = next((x for items in CD_TREE.values() for x in items

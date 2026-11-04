@@ -23,6 +23,9 @@ UA = (
 # 诊断用：只记录"当前线程"的请求，避免并发任务的流量混进来
 _TRACE = threading.local()
 
+# 这些业务码才是"登录态没了"，其它 4xx 都是协议/参数问题
+AUTH_CODES = frozenset({31001, 31023, 40101, -6})
+
 
 def trace_on() -> list:
     """开始记录本线程发出的请求，返回可追加的列表。"""
@@ -116,7 +119,12 @@ class Client:
                 if isinstance(obj, dict):
                     msg = str(obj.get("message") or obj.get("error_msg") or obj.get("error") or "")
                     code = obj.get("code") if obj.get("code") is not None else obj.get("errno")
-                if e.code in (401, 403):
+                # 403 不一定代表登录态失效：UC/夸克的「转存文件token校验异常」也是 403，
+                # 那是分享侧 token 过期，换 stoken 重试就能好，不该让用户去重新扫码。
+                auth_like = e.code == 401 or (
+                    e.code == 403 and (code in AUTH_CODES or "登录" in msg)
+                )
+                if auth_like:
                     extra = f" {msg}" if msg else ""
                     raise AuthExpired(f"{self.provider}: http {e.code}{extra}") from e
                 if 400 <= e.code < 500 and e.code != 429:

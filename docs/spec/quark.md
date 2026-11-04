@@ -56,12 +56,15 @@ JSON：`{"pwd_id": "<分享id>", "passcode": "<提取码或空>"}`
   "to_pdir_fid": "<我的目标目录 fid>",
   "pwd_id": "<分享id>",
   "stoken": "<stoken>",
-  "pdir_fid": "0",
-  "_page": 1, "_size": 50,
-  "_fetch_banner": 0, "_fetch_share": 0, "_fetch_total": 1,
-  "_sort": "file_type:asc,updated_at:desc"
+  "pdir_fid": "<这批文件在分享里的父目录 fid>",
+  "scene": "link"
 }
 ```
+
+**关键约束（实测 2026-11-04）**：`pdir_fid` 必须与 `fid_list` 同源，即这批文件必须
+都是 `pdir_fid` 这个目录的直接子项。全传 `"0"`（分享根）时，根目录的文件能成功，
+子目录里的文件一律返回 `HTTP 403 {"message":"转存文件token校验异常[<token> token校验异常]"}`。
+因此批量转存要**按父目录分组**，每组一次 save；`fid_token_list` 与 `fid_list` 必须一一对应。
 
 → `{"status":0,"data":{"task_id":"..."}}`；随后轮询任务：
 
