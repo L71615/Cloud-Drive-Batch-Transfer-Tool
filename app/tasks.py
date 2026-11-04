@@ -27,7 +27,9 @@ BATCH_SIZE = 20    # 每批转存的文件数（一次 save 提交多个 fid）
 
 DEFAULT_SETTINGS = {
     "concurrency": 2,
-    "qps": 0.8,
+    # 全局请求速率（每秒）。0.8 太保守：1000 个文件光等令牌就要二十多分钟，
+    # 真实网盘在正常网络下能接受 2~3 次/秒；被限流时 _http 会按 Retry-After 退避。
+    "qps": 2.5,
     "retries": 3,
     "default_target": "/PanTransfer",
 }
@@ -94,7 +96,7 @@ class TaskRunner:
                     if k == "default_target":
                         cur[k] = str(patch[k]).strip() or DEFAULT_SETTINGS[k]
                     else:
-                        cur[k] = max(1, int(float(patch[k]))) if k != "qps" else max(0.2, min(3.0, float(patch[k])))
+                        cur[k] = max(1, int(float(patch[k]))) if k != "qps" else max(0.2, min(10.0, float(patch[k])))
                 except (TypeError, ValueError):
                     continue
         self.store.run(
@@ -336,6 +338,10 @@ class TaskRunner:
                                 (done, seen, now(), task_id),
                             )
                             continue
+                        # 一批只能属于同一条分享：pwd_id/stoken/fid_token 都是分享级的，
+                        # 混进别的分享的文件会整批 403（token 校验异常）。
+                        if buf and buf[-1][0].share_id != ref.share_id:
+                            flush_batch()
                         buf.append((ref, entry))
                         if len(buf) >= BATCH_SIZE:
                             flush_batch()

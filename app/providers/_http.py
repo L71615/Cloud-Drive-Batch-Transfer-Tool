@@ -56,7 +56,9 @@ class Client:
         self.credential = (credential or "").strip()
         self.timeout = timeout
         self.referer = referer
-        self._bucket = bucket(f"{provider}:default", qps)
+        self.qps = float(qps)
+        self._bucket_name = f"{provider}:default"
+        self._bucket = bucket(self._bucket_name, qps)
 
     def _headers(self, extra: dict | None = None) -> dict:
         h = {
@@ -90,7 +92,8 @@ class Client:
 
         last: Exception | None = None
         for attempt in range(tries):
-            if not self._bucket.acquire(1.0, timeout=self.timeout * 2):
+            # 每次取桶都带上当前 qps：设置页改速率后立刻生效
+            if not bucket(self._bucket_name, self.qps).acquire(1.0, timeout=self.timeout * 2):
                 raise ProviderError(f"{self.provider}: rate limited locally")
             req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
             try:

@@ -20,6 +20,45 @@ from urllib.parse import parse_qs, urlparse
 BAIDU_SHARE = {"1AbCdEf": {"shareid": "1001", "uk": "555", "pwd": "x9y8"}}
 CD_SHARE = {"a1b2c3d4e5f6": {"pwd": ""}, "zyxwvu987654": {"pwd": "9a8b"}}
 
+# 压测用的分享树：share_id -> {相对 fid: [条目]}。
+# 真实服务端每个分享各有自己的目录树，这里也必须按分享隔离，
+# 否则 200 条链接会共用同一个根，压测就没有意义了。
+SHARE_TREES: dict[str, dict[str, list[dict]]] = {}
+
+
+def tree_for(share_id: str) -> dict[str, list[dict]]:
+    return SHARE_TREES.get(str(share_id or "")) or CD_TREE
+
+
+def install_stress(n_shares: int, files_per_share: int) -> list[str]:
+    """造 n_shares 条分享，每条 1 个根文件 + 1 个子目录（内含若干文件）。
+
+    返回分享 id 列表，供压测脚本拼链接。
+    """
+    ids: list[str] = []
+    for i in range(n_shares):
+        sid = f"stress{i:04d}"
+        root_fid = f"pr{i}"
+        sub = f"d{i}"
+        tree: dict[str, list[dict]] = {
+            "0": [
+                {"fid": f"rf{i}", "file_name": f"root-{i}.txt", "size": 100 + i,
+                 "dir": False, "pdir_fid": root_fid},
+                {"fid": sub, "file_name": f"目录{i}", "size": 0,
+                 "dir": True, "pdir_fid": root_fid},
+            ],
+            sub: [],
+        }
+        for j in range(max(0, files_per_share - 1)):
+            tree[sub].append({
+                "fid": f"f{i}_{j}", "file_name": f"part-{i:04d}-{j:03d}.bin",
+                "size": 1024 * (j + 1), "dir": False, "pdir_fid": sub,
+            })
+        SHARE_TREES[sid] = tree
+        CD_SHARE[sid] = {"pwd": ""}
+        ids.append(sid)
+    return ids
+
 BAIDU_TREE = {
     "/": [
         {"server_filename": "a.txt", "fs_id": 11, "size": 120, "md5": "m-a", "isdir": 0, "path": "/a.txt"},
@@ -202,11 +241,12 @@ class Handler(BaseHTTPRequestHandler):
             # 这里照做，否则"pdir_fid 传查询相对 fid"这种 bug 在自检里看不出来。
             # token 在真实服务端上可复用（只校验归属与有效期），所以不记 used。
             pdir = str(body.get("pdir_fid") or "0")
+            tree = tree_for(body.get("pwd_id"))
             fids = [str(x) for x in (body.get("fid_list") or [])]
             tokens = [str(x) for x in (body.get("fid_token_list") or [])]
             for i, fid in enumerate(fids):
                 got = tokens[i] if i < len(tokens) else ""
-                src = next((x for items in CD_TREE.values() for x in items
+                src = next((x for items in tree.values() for x in items
                             if str(x.get("fid")) == fid), None)
                 if src is None or str(src.get("pdir_fid") or "0") != pdir \
                         or st.issued.get(got) != fid:
@@ -215,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                          "message": f"转存文件token校验异常[{got} token校验异常]"}, 403)
             dst = []
             for fid in (body.get("fid_list") or []):
-                src = next((x for items in CD_TREE.values() for x in items
+                src = next((x for items in tree.values() for x in items
                             if str(x.get("fid")) == str(fid)), {})
                 name = str(src.get("file_name") or "unknown")
                 path = (dpath.rstrip("/") + "/" + name) if dpath != "/" else "/" + name
@@ -287,13 +327,14 @@ class Handler(BaseHTTPRequestHandler):
             if q.get("stoken") != "st-1":
                 return self._json({"status": 41006, "code": 41006, "message": "stoken 无效"})
             fid = str(q.get("pdir_fid") or "0")
-            if fid not in CD_TREE:
+            tree = tree_for(q.get("pwd_id"))
+            if fid not in tree:
                 # 真实服务端：拿条目自己的 pdir_fid 来查 detail 会回 41038，
                 # 查 detail 只能用列表里的相对 fid（根是 "0"）
                 return self._json({"status": 404, "code": 41038,
                                    "message": f"文件没有被分享:[{{{fid}}}]"})
             items = []
-            for x in CD_TREE.get(fid, []):
+            for x in tree.get(fid, []):
                 one = dict(x)
                 # 每次 detail 都发新 token；旧 token 仍可复用（真实行为），
                 # 但"归属必须对得上"这一点保持强校验
