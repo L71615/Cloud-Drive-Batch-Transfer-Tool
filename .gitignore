@@ -3,6 +3,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
+*.log
 
 # 逆向与取证工作区
 orig/

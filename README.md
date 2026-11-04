@@ -53,7 +53,7 @@ Windows 也可以双击 [start.bat](start.bat)。
 ## 离线自检（不碰真实网盘）
 
 ```bash
-python -m unittest discover -s tests     # 17 个用例，含 8 个适配器链路用例
+python -m unittest discover -s tests     # 52 个用例，含适配器链路、链接解析、登录态、限速
 python tools/e2e_check.py                # 假网盘 + 真 HTTP 服务 + 真任务引擎，全链路
 ```
 
@@ -71,11 +71,29 @@ python run.py --port 8765 --gateway http://127.0.0.1:8899
 
 - `total` 是**分享内已发现的文件数**，不是链接条数。一条 uc/夸克 分享链接指向的往往是一整个目录，
   里面有几百上千个文件，所以 `total` 会随着目录被展开而不断增长——这是正常的。
-- 目录读取和转存是**流水线**：发现一批就转一批（每批 `BATCH_SIZE=20`，一次 save 提交多个 `fid`），
-  所以大分享不用等整棵树读完才开始动，`done` 会一路往上走。
-- 目录展开有上限：深度 8 层、5000 个文件、读取总时长 600 秒；超过会明确报错而不是无限等待。
-- 速度受「设置」里的 QPS 限制（默认 0.8 请求/秒，可调到 3.0）。每个文件平均 1–3 个请求，
-  想更快就调高 QPS，但别超过网盘的风控阈值。
+- 任务是**两段式**：先只读不写地把所有分享的目录展开完（状态 `读取目录`，进度 `已发现 N 个文件`），
+  再逐条转存（状态 `转存中`，每成功一个界面 `+1`）。这样进度条的分母一开始就是确定的，
+  而且任务详情里能立刻看到完整清单。
+- 一批里的文件必须来自**同一条分享**（`pwd_id`/`stoken`/`fid_token` 都是分享级的，混批会整批 403），
+  所以流水线遇到分享切换就切批；每批 `BATCH_SIZE=20`，一次 save 提交多个 `fid`。
+- 硬边界：单条分享最多 5000 个文件 / 8 层目录深度 / 30 分钟处理时间；目标目录判重最多看 4 层、20000 个文件。
+  超过会明确报错，不会静默少转。
+- 速度**自动调速**：设置里的 QPS 只是上限（默认 2.5，最高 10）。被限速（429 或"请求过于频繁"）会自动减半，
+  连续顺利会自动回升，页面实时显示每个网盘当前速率。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/login.md](docs/login.md) | 三个网盘分别怎么拿到 Cookie、有效期与失效表现、三种录入方式的区别、安全说明 |
+| [docs/spec/README.md](docs/spec/README.md) | 协议规格的写法纪律（实现只照规格写）与总索引 |
+| [docs/spec/baidu.md](docs/spec/baidu.md) | 百度网盘：登录态、请求头、`shorturlinfo`/`verify`+`sekey`、`share/list`、`share/transfer`、`api/list`·`api/create`·`api/quota`、errno 表 |
+| [docs/spec/quark.md](docs/spec/quark.md) | 夸克网盘：`sharepage/token`·`detail`·`save`、`task` 轮询、`file/sort`、`member`、状态码 |
+| [docs/spec/uc.md](docs/spec/uc.md) | UC 网盘：与夸克同构但端点独立；`pdir_fid` 必须与 `fid_list` 同源等实测约束 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 洁净室规则、只用标准库、QPS 纪律、提交前检查 |
+| [LICENSE](LICENSE) | MIT |
+
+每份规格的 §9 列出"还没用真实账号确认"的项，§8 是错误码表——真机上遇到报错先查这两节。
 
 ## 架构
 
