@@ -217,6 +217,67 @@
     }, 350);
   }
 
+  /* ---------------- 扫码登录（浏览器代登录） ---------------- */
+  let loginTimer = null, loginSid = null;
+
+  function stopLoginPoll() {
+    clearTimeout(loginTimer); loginTimer = null;
+    $('#btnLoginCancel').hidden = true;
+  }
+
+  async function startBrowserLogin() {
+    const provider = $('#accProvider').value;
+    if (!provider) { note('#loginHint', '先选一个网盘', true); return; }
+    note('#loginHint', '正在打开登录窗口…');
+    try {
+      const r = await post('/api/login/browser', { provider });
+      loginSid = r.login.sid;
+      $('#btnLoginCancel').hidden = false;
+      note('#loginHint', r.hint || '等待登录…');
+      pollLogin();
+    } catch (e) { note('#loginHint', e.message, true); }
+  }
+
+  async function pollLogin() {
+    if (!loginSid) return;
+    try {
+      const r = await api('/api/login/browser/' + loginSid);
+      const lg = r.login;
+      if (lg.status === 'ready') { await finishLogin(lg); return; }
+      note('#loginHint', lg.message || '等待登录…');
+      if (lg.status === 'closed' || lg.status === 'error') { stopLoginPoll(); return; }
+    } catch (e) {
+      note('#loginHint', e.message, true);
+      stopLoginPoll();
+      return;
+    }
+    loginTimer = setTimeout(pollLogin, 1200);
+  }
+
+  async function finishLogin() {
+    clearTimeout(loginTimer); loginTimer = null;
+    try {
+      const r = await post('/api/login/browser/save', {
+        sid: loginSid, name: $('#accName').value.trim(),
+      });
+      toast(`登录成功，已保存（${r.count} 个字段）`, 'ok');
+      note('#loginHint', '登录成功，已加入账号列表');
+      $('#accCookie').value = ''; $('#accName').value = '';
+      loginSid = null;
+      $('#btnLoginCancel').hidden = true;
+      loadAccounts();
+    } catch (e) { note('#loginHint', e.message, true); }
+  }
+
+  async function cancelLogin() {
+    if (loginSid) {
+      try { await fetch('/api/login/browser/' + loginSid, { method: 'DELETE' }); } catch (e) { /* ignore */ }
+    }
+    stopLoginPoll();
+    loginSid = null;
+    note('#loginHint', '已取消，窗口已关闭');
+  }
+
   /* ---------------- 解析 / 建任务 ---------------- */
   async function doParse() {
     const text = $('#links').value;
@@ -600,6 +661,8 @@
       $('#cred').style.display = haveManual() || !has ? 'block' : 'none';
     };
     $('#btnSaveAcc').onclick = saveAccount;
+    $('#btnLogin').onclick = startBrowserLogin;
+    $('#btnLoginCancel').onclick = cancelLogin;
     $('#btnSaveSet').onclick = saveSettings;
     $('#btnBrowse').onclick = openDirPicker;
     $('#dirClose').onclick = closeDir;

@@ -26,6 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from . import __version__
+from .browser_login import MANAGER as LOGIN_MANAGER
+from .browser_login import BrowserLoginError
 from .credentials import normalize, validate
 from .db import Store, now
 from .providers import create, names
@@ -38,6 +40,7 @@ TASK_ACTION = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)/(pause|resume|cancel|retry
 TASK_ONE = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)$")
 ACCOUNT_ONE = re.compile(r"^/api/accounts/(\d+)$")
 ACCOUNT_CHECK = re.compile(r"^/api/accounts/(\d+)/check$")
+LOGIN_ONE = re.compile(r"^/api/login/browser/([0-9a-zA-Z]+)$")
 
 
 class App:
@@ -47,6 +50,7 @@ class App:
 
     def close(self) -> None:
         self.runner.shutdown()
+        LOGIN_MANAGER.close_all()
         self.store.close()
 
 
@@ -108,6 +112,10 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 self.app.runner.delete(m.group(1))
                 return self._send(200, {"ok": True})
+            m = LOGIN_ONE.match(u.path)
+            if m:
+                LOGIN_MANAGER.close(m.group(1))
+                return self._send(200, {"ok": True})
             self._err(404, "not found")
         except Exception as e:  # noqa: BLE001
             self._err(500, f"{type(e).__name__}: {e}")
@@ -165,6 +173,12 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT id,provider,name,created_at FROM accounts ORDER BY id DESC"
             )
             return self._send(200, {"ok": True, "accounts": rows})
+        m = LOGIN_ONE.match(path)
+        if m:
+            sess = LOGIN_MANAGER.get(m.group(1))
+            if not sess:
+                return self._err(404, "登录会话不存在或已关闭")
+            return self._send(200, {"ok": True, "login": sess.poll()})
         if path == "/api/tasks":
             limit = min(int(parse_qs(u.query).get("limit", ["100"])[0]), 500)
             rows = self.app.store.all(
@@ -186,6 +200,32 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/settings":
             return self._send(200, {"ok": True, "settings": self.app.runner.update_settings(body)})
+
+        if path == "/api/login/browser":
+            provider = str(body.get("provider") or "")
+            try:
+                view = LOGIN_MANAGER.start(provider)
+            except BrowserLoginError as e:
+                return self._err(400, str(e))
+            return self._send(200, {"ok": True, "login": view,
+                                    "hint": "浏览器窗口已打开，登录完成后这里会自动捕获登录态"})
+
+        if path == "/api/login/browser/save":
+            sid = str(body.get("sid") or "")
+            sess = LOGIN_MANAGER.get(sid)
+            if not sess:
+                return self._err(404, "登录会话不存在或已关闭")
+            view = sess.poll()
+            if view["status"] != "ready":
+                return self._err(400, view["message"] or "尚未捕获到登录态")
+            name = str(body.get("name") or "").strip() or f"{view['provider']}-扫码"
+            self.app.store.run(
+                "INSERT INTO accounts(provider,name,credential,created_at) VALUES(?,?,?,?)",
+                (view["provider"], name, view["cookie"], now()),
+            )
+            row = self.app.store.one("SELECT id FROM accounts ORDER BY id DESC LIMIT 1") or {}
+            LOGIN_MANAGER.close(sid)
+            return self._send(200, {"ok": True, "id": row.get("id"), "count": view["count"]})
 
         m = ACCOUNT_CHECK.match(path)
         if m:

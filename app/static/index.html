@@ -163,6 +163,19 @@ https://drive.uc.cn/s/zyxwvu987654"></textarea>
         </div>
 
         <div class="card">
+          <div class="card-h"><h2>扫码登录</h2><span class="hint">推荐：不用手动找 Cookie</span></div>
+          <p class="hint-line" style="margin-top:0">
+            点下面的按钮会弹出一个小窗，里面是官方的登录页；用手机 App 扫码（或直接输账号密码）登录，
+            本工具只读取登录成功后浏览器里的 Cookie，不接触你的密码。
+          </p>
+          <div class="row" style="margin-top:12px">
+            <button id="btnLogin">打开登录窗口并扫码</button>
+            <button class="ghost" id="btnLoginCancel" hidden>取消</button>
+            <span class="hint-line" id="loginHint"></span>
+          </div>
+        </div>
+
+        <div class="card">
           <div class="card-h"><h2>怎么拿到 Cookie</h2><span class="hint">浏览器已登录，复制一次即可</span></div>
           <label class="f">按网盘看步骤</label>
           <select id="guideProvider"></select>

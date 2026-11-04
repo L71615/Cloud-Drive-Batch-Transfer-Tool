@@ -25,6 +25,18 @@ Windows 也可以双击 [start.bat](start.bat)。
 
 没有真实账号也能先跑通全链路：网盘选 **演示模式（mock）**，随便粘贴几行字即可。
 
+## 扫码登录（推荐）
+
+「账号管理 → 扫码登录 → 打开登录窗口并扫码」：
+
+1. 工具用系统自带 Edge 开一个**独立 profile 的窗口**，直接打开官方登录页；
+2. 你在那个窗口里扫码（或输账号密码、过验证码），全部由官方页面完成；
+3. 登录成功后，工具通过 Chrome DevTools Protocol 读取该域名下的 Cookie，校验后自动存进账号列表并关掉窗口。
+
+实现上不碰任何登录协议、不需要 AppKey、不需要开放平台资质：二维码是官方页面自己画的，我们只做"读 Cookie"这一步（`app/browser_login.py`，纯标准库手写的 WebSocket 客户端）。因此官方改版也不会让我们失效——除非它整个改掉网页登录。
+
+也可以走手动路线（没有 Edge / 想用别的浏览器）：按 **[docs/login.md](docs/login.md)** 复制 Cookie 粘贴进来，同样是自动清洗 + 校验。
+
 ## 能力矩阵
 
 | 网盘 | 链接解析 | 提取码 | 递归列目录 | 转存 | 容量查询 | 状态 |
@@ -85,6 +97,11 @@ tools/                  假网盘、端到端自检
 | GET | `/api/stats` | 运行中/完成/失败任务数、文件总数 |
 | GET/POST | `/api/accounts` | 列出 / 保存登录态 |
 | POST | `/api/accounts/{id}/check` | 检测登录态是否有效 |
+| POST | `/api/accounts/validate` | 只校验 Cookie 格式（不联网、不落库） |
+| POST | `/api/login/browser` | 打开代登录窗口，返回会话 id |
+| GET | `/api/login/browser/{sid}` | 轮询登录状态，`ready` 时带捕获到的 Cookie |
+| POST | `/api/login/browser/save` | 把该会话的登录态存进账号列表并关窗 |
+| DELETE | `/api/login/browser/{sid}` | 放弃登录，关闭窗口 |
 | DELETE | `/api/accounts/{id}` | 删除登录态 |
 | GET/POST | `/api/settings` | 引擎设置（并发 / QPS / 重试 / 默认目录） |
 | POST | `/api/parse` | 只解析链接，不联网 |
