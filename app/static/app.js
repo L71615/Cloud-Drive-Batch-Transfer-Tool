@@ -49,6 +49,7 @@
     tasks: ['转存任务', '实时进度 · 支持暂停 / 继续 / 取消'],
     accounts: ['账号管理', '保存你自己的登录态（仅本机）'],
     settings: ['设置', '任务引擎与限速参数'],
+    diag: ['协议诊断', '按步骤跑最小链路，核对原始响应'],
     about: ['关于', '版本与免责声明'],
   };
 
@@ -62,6 +63,7 @@
     if (view === 'tasks') loadTasks();
     if (view === 'accounts') { loadAccounts(); }
     if (view === 'settings') loadSettings();
+    if (view === 'diag') initDiag();
   }
 
   /* ---------------- 网盘 ---------------- */
@@ -341,6 +343,145 @@
     return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
   };
 
+  /* ---------------- 目录浏览 ---------------- */
+  const DIR = { provider: '', accountId: '', credential: '', path: '/', items: [] };
+
+  function credQuery() {
+    const accId = $('#accountSel').value;
+    if (accId) return 'account_id=' + encodeURIComponent(accId);
+    const c = $('#cred').value.trim();
+    return c ? 'credential=' + encodeURIComponent(c) : '';
+  }
+
+  async function openDirPicker() {
+    DIR.provider = S.provider;
+    DIR.path = $('#target').value.trim() || '/';
+    if (!DIR.path.startsWith('/')) DIR.path = '/' + DIR.path;
+    $('#dirMask').classList.add('on');
+    $('#dirDrawer').classList.add('on');
+    await loadDir(DIR.path);
+  }
+
+  async function loadDir(path) {
+    DIR.path = path || '/';
+    $('#dirPath').textContent = DIR.path;
+    $('#dirList').innerHTML = '<div class="dir-empty">加载中…</div>';
+    const q = [`provider=${encodeURIComponent(DIR.provider)}`,
+               'path=' + encodeURIComponent(DIR.path)];
+    const auth = credQuery();
+    if (auth) q.push(auth);
+    try {
+      const r = await api('/api/browse?' + q.join('&'));
+      DIR.items = r.items || [];
+      renderDir();
+    } catch (e) {
+      DIR.items = [];
+      $('#dirList').innerHTML = `<div class="dir-empty">读取失败：${esc(e.message)}</div>`;
+      $('#dirNote').textContent = '需要有效的登录态才能浏览目录';
+    }
+  }
+
+  function renderDir() {
+    const box = $('#dirList');
+    box.innerHTML = '';
+    const noteEl = $('#dirNote');
+    if (DIR.path !== '/') {
+      const up = document.createElement('div');
+      up.className = 'dir-item';
+      up.innerHTML = '<span class="di">↑</span><span class="dn">上一级</span>';
+      up.onclick = () => loadDir(parentOf(DIR.path));
+      box.append(up);
+    }
+    const dirs = DIR.items.filter(x => x.is_dir);
+    dirs.forEach(x => {
+      const row = document.createElement('div');
+      row.className = 'dir-item';
+      row.innerHTML = `<span class="di">📁</span><span class="dn">${esc(x.name)}</span>`;
+      row.onclick = () => loadDir(x.path);
+      box.append(row);
+    });
+    const files = DIR.items.length - dirs.length;
+    noteEl.textContent = dirs.length
+      ? `${dirs.length} 个文件夹${files ? ` · ${files} 个文件已忽略` : ''}`
+      : '这里没有子文件夹，可以直接选这个目录';
+    if (!DIR.items.length) box.innerHTML = '<div class="dir-empty">空目录</div>';
+  }
+
+  const parentOf = (p) => {
+    const t = p.replace(/\/+$/, '');
+    const i = t.lastIndexOf('/');
+    return i <= 0 ? '/' : t.slice(0, i);
+  };
+
+  function pickDir() {
+    $('#target').value = DIR.path;
+    closeDir();
+    toast('目标目录：' + DIR.path, 'ok');
+  }
+
+  function closeDir() {
+    $('#dirMask').classList.remove('on');
+    $('#dirDrawer').classList.remove('on');
+  }
+
+  /* ---------------- 协议诊断 ---------------- */
+  function initDiag() {
+    const sel = $('#diagProvider');
+    if (!sel.options.length) {
+      S.meta.providers.forEach(p => sel.append(new Option(p.label, p.name)));
+    }
+    if (S.meta.providers.some(p => p.name === S.provider)) sel.value = S.provider;
+    syncDiagAccount();
+  }
+
+  function syncDiagAccount() {
+    const prov = $('#diagProvider').value;
+    const sel = $('#diagAccount');
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">（不使用账号，手动填 Cookie）</option>';
+    S.accounts.filter(a => a.provider === prov)
+      .forEach(a => sel.append(new Option(a.name || `${providerInfo(prov).label} #${a.id}`, String(a.id))));
+    if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+    $('#diagCred').style.display = sel.value ? 'none' : 'block';
+  }
+
+  async function runDiag() {
+    const provider = $('#diagProvider').value;
+    const link = $('#diagLink').value.trim();
+    if (!link) { note('#diagHint', '先填一条分享链接', true); return; }
+    const body = { provider, link, passcode: $('#diagPass').value.trim() };
+    const accId = $('#diagAccount').value;
+    if (accId) body.account_id = Number(accId);
+    else if ($('#diagCred').value.trim()) body.credential = $('#diagCred').value.trim();
+
+    const btn = $('#btnDiag');
+    btn.disabled = true;
+    note('#diagHint', '正在按步骤执行…');
+    try {
+      const r = await post('/api/diag', body);
+      const steps = r.steps || [];
+      const okN = steps.filter(s => s.ok).length;
+      $('#diagSummary').textContent = `${okN}/${steps.length} 步成功`;
+      $('#diagBody').innerHTML = steps.map(s => `
+        <tr>
+          <td>${esc(s.name)}</td>
+          <td>${s.ok ? '<span class="pill ok">通过</span>' : '<span class="pill bad">失败</span>'}</td>
+          <td class="muted">${s.ms} ms</td>
+          <td class="step-detail">${esc(s.detail || s.error || '')}</td>
+        </tr>`).join('');
+      $('#diagCard').hidden = false;
+      const raw = r.raw || [];
+      $('#diagRaw').textContent = raw.length
+        ? raw.map((x, i) => `#${i + 1}  ${x.method} ${x.url}\n${x.response}`).join('\n\n── ── ──\n\n')
+        : '（本次没有发出 HTTP 请求）';
+      $('#diagRawCard').hidden = false;
+      const bad = steps.find(s => !s.ok);
+      note('#diagHint', bad ? `第一步失败：${bad.name}` : '全部步骤通过', !!bad);
+    } catch (e) {
+      note('#diagHint', e.message, true);
+    } finally { btn.disabled = false; }
+  }
+
   /* ---------------- 设置 ---------------- */
   async function loadSettings() {
     const { settings } = await api('/api/settings');
@@ -402,11 +543,22 @@
     };
     $('#btnSaveAcc').onclick = saveAccount;
     $('#btnSaveSet').onclick = saveSettings;
+    $('#btnBrowse').onclick = openDirPicker;
+    $('#dirClose').onclick = closeDir;
+    $('#dirMask').onclick = closeDir;
+    $('#dirUp').onclick = () => loadDir(parentOf(DIR.path));
+    $('#dirPick').onclick = pickDir;
+    $('#btnDiag').onclick = runDiag;
+    $('#diagProvider').onchange = () => { syncDiagAccount(); $('#diagCard').hidden = true; $('#diagRawCard').hidden = true; };
     $('#btnRefresh').onclick = () => { loadTasks(); toast('已刷新'); };
     $('#taskFilter').onchange = () => { S.filter = $('#taskFilter').value; loadTasks(); };
     $('#mask').onclick = closeDrawer;
     $('#drawerClose').onclick = closeDrawer;
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if ($('#dirDrawer').classList.contains('on')) closeDir();
+      else closeDrawer();
+    });
 
     const view = (location.hash || '').replace('#', '');
     go(TITLES[view] ? view : 'transfer');

@@ -108,6 +108,52 @@ class AdapterTest(unittest.TestCase):
         with self.assertRaises(AuthExpired):
             p.list_dir("0")
 
+    # ---------------- 目录浏览 / 协议诊断 ----------------
+    def test_baidu_browse_after_transfer(self):
+        p = self._p(BaiduProvider)
+        ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: x9y8")[0]
+        entries = p.list_share(ref)
+        p.transfer(ref, entries[0], "/浏览测试")
+        top = [x["name"] for x in p.browse("/")]
+        self.assertIn("浏览测试", top)
+        self.assertTrue(all(x["is_dir"] for x in p.browse("/") if x["name"] == "浏览测试"))
+        sub = p.browse("/浏览测试")
+        self.assertEqual([x["name"] for x in sub], ["a.txt"])
+        self.assertFalse(sub[0]["is_dir"])
+        self.assertEqual(sub[0]["path"], "/浏览测试/a.txt")
+
+    def test_quark_browse_after_transfer(self):
+        p = self._p(QuarkProvider, cookie="__pus=abc")
+        ref = p.parse_links("https://pan.quark.cn/s/a1b2c3d4e5f6")[0]
+        entries = p.list_share(ref)
+        p.transfer(ref, entries[0], "/浏览测试")
+        top = [x["name"] for x in p.browse("/")]
+        self.assertIn("浏览测试", top)
+        self.assertEqual([x["name"] for x in p.browse("/浏览测试")], ["a.txt"])
+
+    def test_quark_browse_missing_dir(self):
+        p = self._p(QuarkProvider, cookie="__pus=abc")
+        with self.assertRaises(ProviderError):
+            p.browse("/不存在的目录")
+
+    def test_baidu_diagnose_steps(self):
+        p = self._p(BaiduProvider)
+        ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: x9y8")[0]
+        steps = p.diagnose(ref)
+        self.assertEqual(len(steps), 4)
+        self.assertTrue(all(s["ok"] for s in steps), steps)
+        self.assertIn("总", steps[-1]["detail"])
+
+    def test_quark_diagnose_reports_failure(self):
+        p = self._p(QuarkProvider, cookie="__pus=abc")
+        ref = p.parse_links("https://pan.quark.cn/s/zyxwvu987654")[0]
+        ref.passcode = "0000"
+        steps = p.diagnose(ref)
+        self.assertEqual(len(steps), 4, "失败的步骤不能中断后面的步骤")
+        self.assertTrue(steps[0]["ok"])
+        self.assertFalse(steps[1]["ok"], "第二步取 token 应失败")
+        self.assertIn("error", steps[1])
+
 
 if __name__ == "__main__":
     unittest.main()

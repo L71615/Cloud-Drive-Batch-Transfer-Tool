@@ -92,5 +92,30 @@ class Provider(abc.ABC):
     def list_dir(self, path: str) -> list[Entry]:
         raise ProviderNotReady(f"{self.name}: list_dir 未实现")
 
+    def browse(self, path: str = "/") -> list[dict]:
+        """浏览"我的网盘"某一层，供界面选目录用。不创建目录。
+
+        返回 [{name, path, is_dir, size, meta}]，path 为绝对路径。
+        """
+        raise ProviderNotReady(f"{self.name}: browse 未实现")
+
     def quota(self) -> dict:
         raise ProviderNotReady(f"{self.name}: quota 未实现")
+
+    def diagnose(self, ref: ShareRef) -> list[dict]:
+        """分段跑一次最小链路，供界面"协议诊断"用。不改动任何数据。"""
+        steps: list[dict] = []
+        self._run_step(steps, "链接解析", lambda: f"share_id={ref.share_id}")
+        return steps
+
+    def _run_step(self, steps: list[dict], name: str, fn) -> None:
+        import time as _t
+        t0 = _t.time()
+        try:
+            detail = fn()
+            steps.append({"name": name, "ok": True,
+                          "ms": int((_t.time() - t0) * 1000), "detail": str(detail or "")})
+        except Exception as e:  # noqa: BLE001 - 诊断就是要看到原始错误
+            steps.append({"name": name, "ok": False,
+                          "ms": int((_t.time() - t0) * 1000),
+                          "error": f"{type(e).__name__}: {e}"})

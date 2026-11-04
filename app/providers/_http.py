@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -18,6 +19,31 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+# 诊断用：只记录"当前线程"的请求，避免并发任务的流量混进来
+_TRACE = threading.local()
+
+
+def trace_on() -> list:
+    """开始记录本线程发出的请求，返回可追加的列表。"""
+    _TRACE.sink = []
+    return _TRACE.sink
+
+
+def trace_off() -> None:
+    _TRACE.sink = None
+
+
+def _record(method: str, url: str, response) -> None:
+    sink = getattr(_TRACE, "sink", None)
+    if sink is None:
+        return
+    text = response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)
+    sink.append({
+        "method": method,
+        "url": url,
+        "response": text[:4000],
+    })
 
 
 class Client:
@@ -69,11 +95,14 @@ class Client:
                     raw = resp.read()
                 text = raw.decode("utf-8", "replace")
                 try:
-                    return json.loads(text)
+                    obj = json.loads(text)
                 except json.JSONDecodeError:
-                    return text
+                    obj = text
+                _record(method, url, obj)
+                return obj
             except urllib.error.HTTPError as e:
                 if e.code in (401, 403):
+                    _record(method, url, f"HTTP {e.code}")
                     raise AuthExpired(f"{self.provider}: http {e.code}") from e
                 last = e
             except (urllib.error.URLError, TimeoutError) as e:

@@ -38,6 +38,20 @@ class MockProvider(Provider):
             out.append(ShareRef(self.name, sid, token, "", f"sample-{sid[:6]}"))
         return out
 
+    def browse(self, path: str = "/") -> list[dict]:
+        base = str(path or "/").rstrip("/")
+        if base in ("", "/"):
+            return [
+                {"name": "PanTransfer", "path": "/PanTransfer", "is_dir": True, "size": 0, "meta": {}},
+                {"name": "备份", "path": "/备份", "is_dir": True, "size": 0, "meta": {}},
+            ]
+        if base == "/PanTransfer":
+            return [
+                {"name": "网盘转存", "path": "/PanTransfer/网盘转存", "is_dir": True, "size": 0, "meta": {}},
+                {"name": "readme.txt", "path": "/PanTransfer/readme.txt", "is_dir": False, "size": 128, "meta": {}},
+            ]
+        return []
+
     def list_share(self, ref: ShareRef) -> list[Entry]:
         time.sleep(0.05)
         n = 3 + int(ref.share_id[:2], 16) % 4

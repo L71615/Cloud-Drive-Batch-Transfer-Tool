@@ -35,6 +35,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.35.42.64.77.79H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         <span>设置</span>
       </div>
+      <div class="nav-item" data-view="diag">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>
+        <span>协议诊断</span>
+      </div>
       <div class="nav-item" data-view="about">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
         <span>关于</span>
@@ -83,7 +87,10 @@ https://drive.uc.cn/s/zyxwvu987654"></textarea>
         <div class="card">
           <div class="card-h"><h2>转存选项</h2></div>
           <label class="f">转存到目录</label>
-          <input id="target" value="/PanTransfer" spellcheck="false">
+          <div class="row">
+            <input id="target" value="/PanTransfer" spellcheck="false" style="flex:1">
+            <button class="ghost sm" id="btnBrowse">浏览…</button>
+          </div>
 
           <label class="f">登录态 <em>（从「账号管理」选择，或临时粘贴 Cookie）</em></label>
           <div class="row">
@@ -189,6 +196,35 @@ https://drive.uc.cn/s/zyxwvu987654"></textarea>
         </div>
       </section>
 
+      <!-- 协议诊断 -->
+      <section class="page" id="page-diag">
+        <div class="card">
+          <div class="card-h"><h2>协议诊断</h2><span class="hint">按段落跑一次最小链路，看每一步的原始响应</span></div>
+          <div class="row" style="gap:10px">
+            <select id="diagProvider" style="flex:0 0 160px"></select>
+            <input id="diagLink" placeholder="分享链接（可带提取码）" style="flex:1" spellcheck="false">
+          </div>
+          <div class="row" style="gap:10px;margin-top:8px">
+            <input id="diagPass" placeholder="提取码（可选）" style="flex:0 0 160px" spellcheck="false">
+            <select id="diagAccount" style="flex:1"></select>
+            <button id="btnDiag">开始诊断</button>
+          </div>
+          <input id="diagCred" placeholder="或临时粘贴 Cookie（未选账号时使用）" style="margin-top:8px" spellcheck="false">
+          <div class="hint-line" id="diagHint">只读：不会创建目录、不会转存任何文件</div>
+        </div>
+
+        <div class="card" id="diagCard" hidden>
+          <div class="card-h"><h2>步骤结果</h2><span class="hint" id="diagSummary"></span></div>
+          <table class="tb"><thead><tr><th>步骤</th><th>结果</th><th>耗时</th><th>详情</th></tr></thead>
+            <tbody id="diagBody"></tbody></table>
+        </div>
+
+        <div class="card" id="diagRawCard" hidden>
+          <div class="card-h"><h2>原始响应</h2><span class="hint">逐条 HTTP 请求与返回，便于比对规格</span></div>
+          <pre class="raw" id="diagRaw"></pre>
+        </div>
+      </section>
+
       <!-- 关于 -->
       <section class="page" id="page-about">
         <div class="card">
@@ -220,6 +256,28 @@ https://drive.uc.cn/s/zyxwvu987654"></textarea>
     <button class="ghost sm" id="drawerClose">关闭</button>
   </div>
   <div class="db" id="drawerBody"></div>
+</aside>
+
+<div class="drawer-mask" id="dirMask"></div>
+<aside class="drawer" id="dirDrawer" style="width:min(620px,94vw)">
+  <div class="dh">
+    <h3>选择目录</h3>
+    <span class="grow"></span>
+    <button class="ghost sm" id="dirClose">关闭</button>
+  </div>
+  <div class="db">
+    <div class="row">
+      <button class="ghost sm" id="dirUp">↑ 上一级</button>
+      <span class="muted" id="dirPath" style="margin-left:10px">/</span>
+    </div>
+    <div id="dirList" style="margin-top:12px"></div>
+    <hr class="sep">
+    <div class="row">
+      <span class="muted" id="dirNote">点目录进入下一层</span>
+      <span class="grow"></span>
+      <button id="dirPick">选这个目录</button>
+    </div>
+  </div>
 </aside>
 
 <div class="toasts" id="toasts"></div>

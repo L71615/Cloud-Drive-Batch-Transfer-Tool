@@ -232,6 +232,20 @@ class BaiduProvider(Provider):
             for x in self._list_dir(path)
         ]
 
+    def browse(self, path: str = "/") -> list[dict]:
+        base = str(path or "/").rstrip("/")
+        out = []
+        for x in self._list_dir(path or "/"):
+            name = str(x.get("server_filename") or "")
+            out.append({
+                "name": name,
+                "path": f"{base}/{name}",
+                "is_dir": bool(x.get("isdir")),
+                "size": int(x.get("size") or 0),
+                "meta": {"fs_id": x.get("fs_id")},
+            })
+        return out
+
     def quota(self) -> dict:
         data = self._c().request("GET", self.BASE + "/api/quota", params={
             "checkfree": "1", "checkexpire": "1", **self._common(),
@@ -249,3 +263,28 @@ class BaiduProvider(Provider):
         except AuthExpired as e:
             return {"valid": False, "message": f"登录态已失效：{e}"}
         return {"valid": True, "message": "登录态有效"}
+
+    def diagnose(self, ref: ShareRef) -> list[dict]:
+        steps: list[dict] = []
+        meta: dict = {}
+        self._run_step(steps, "解析链接", lambda: f"share_id={ref.share_id} 提取码={'有' if ref.passcode else '无'}")
+
+        def _meta():
+            meta.update(self.share_meta(ref))
+            return (f"shareid={meta.get('shareid')} uk={meta.get('uk')} "
+                    f"sekey={'有' if meta.get('sekey') else '无'}")
+        self._run_step(steps, "分享信息 / 提取码校验", _meta)
+
+        def _list():
+            if not meta:
+                raise ProviderError("上一步没有拿到 shareid，跳过")
+            items, n = self._page_share(ref, meta, "/", 1)
+            names = [str(x.get("server_filename")) for x in items[:5]]
+            return f"根目录 {n} 项：{', '.join(names)}"
+        self._run_step(steps, "列分享根目录（第一页）", _list)
+
+        def _quota():
+            q = self.quota()
+            return f"总 {q['total'] // 1024 ** 3} GB / 已用 {q['used'] // 1024 ** 3} GB"
+        self._run_step(steps, "查询我的容量", _quota)
+        return steps

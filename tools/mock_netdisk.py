@@ -42,12 +42,34 @@ CD_TREE = {
 }
 
 
+def _parent(p: str) -> str:
+    p = (p or "/").rstrip("/") or "/"
+    i = p.rfind("/")
+    return "/" if i <= 0 else p[:i]
+
+
+def _base(p: str) -> str:
+    return (p or "").rstrip("/").rsplit("/", 1)[-1]
+
+
 class State:
+    """一次进程内的"用户网盘"模型：够用来验证列目录 / 建目录 / 转存落盘。"""
+
     def __init__(self) -> None:
-        self.dirs = {"/"}
+        self.mkdirs = 0
         self.saves: list[dict] = []
         self.transfers: list[dict] = []
-        self.mkdirs = 0
+        # 百度：绝对路径 -> {isdir,size,md5,fid}
+        self.baidu: dict[str, dict] = {}
+        # 夸克 / UC：绝对路径 <-> fid
+        self.cd_dirs: dict[str, str] = {"/": "0"}
+        self.cd_fid_dir: dict[str, str] = {"0": "/"}
+        self.cd: dict[str, dict] = {}
+        self.seq = 0
+
+    def new_fid(self, prefix: str) -> str:
+        self.seq += 1
+        return f"{prefix}{self.seq}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -118,14 +140,28 @@ class Handler(BaseHTTPRequestHandler):
                      for items in BAIDU_TREE.values() for x in items}
             dest = str(body.get("path") or "/").rstrip("/")
             to = [{"from": f, "to": f"{dest}/{names.get(str(f), 'unknown')}"} for f in fids]
+            for f in fids:
+                name = names.get(str(f), "unknown")
+                path = f"{dest}/{name}"
+                src = next((x for items in BAIDU_TREE.values() for x in items
+                            if str(x["fs_id"]) == str(f)), {})
+                self.state.baidu.setdefault(path, {
+                    "isdir": False, "size": int(src.get("size") or 0),
+                    "md5": str(src.get("md5") or ""), "fid": self.state.new_fid("bf"),
+                })
             return self._json({"errno": 0, "extra": {"list": to}})
 
         if p == "/baidu/api/create":
             if not self._guard("baidu"):
                 return
-            self.state.dirs.add(str(body.get("path") or "/"))
+            path = str(body.get("path") or "/")
+            seg = ""
+            for part in [x for x in path.split("/") if x]:
+                seg = seg + "/" + part
+                self.state.baidu.setdefault(
+                    seg, {"isdir": True, "size": 0, "fid": self.state.new_fid("bd")})
             self.state.mkdirs += 1
-            return self._json({"errno": 0, "path": body.get("path")})
+            return self._json({"errno": 0, "path": path})
 
         if p == "/cd/1/clouddrive/share/sharepage/token":
             if not self._guard("cd"):
@@ -140,14 +176,35 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/cd/1/clouddrive/share/sharepage/save":
             if not self._guard("cd"):
                 return
-            self.state.saves.append(body)
+            st = self.state
+            dest_fid = str(body.get("to_pdir_fid") or "0")
+            dpath = st.cd_fid_dir.get(dest_fid, "/")
+            dst = []
+            for fid in (body.get("fid_list") or []):
+                src = next((x for items in CD_TREE.values() for x in items
+                            if str(x.get("fid")) == str(fid)), {})
+                name = str(src.get("file_name") or "unknown")
+                path = (dpath.rstrip("/") + "/" + name) if dpath != "/" else "/" + name
+                st.cd.setdefault(path, {
+                    "size": int(src.get("size") or 0), "fid": st.new_fid("cf"),
+                })
+                dst.append({"path": path, "fid": st.cd[path]["fid"]})
+            st.saves.append({**body, "dst": dst})
             return self._json({"status": 0, "code": 0, "data": {"task_id": "tk-1"}})
 
         if p == "/cd/1/clouddrive/file":
             if not self._guard("cd"):
                 return
-            self.state.mkdirs += 1
-            return self._json({"status": 0, "code": 0, "data": {"fid": f"dir{self.state.mkdirs}"}})
+            st = self.state
+            parent_fid = str(body.get("pdir_fid") or "0")
+            name = str(body.get("file_name") or "新建文件夹")
+            ppath = st.cd_fid_dir.get(parent_fid, "/")
+            path = (ppath.rstrip("/") + "/" + name) if ppath != "/" else "/" + name
+            fid = st.new_fid("d")
+            st.cd_dirs[path] = fid
+            st.cd_fid_dir[fid] = path
+            st.mkdirs += 1
+            return self._json({"status": 0, "code": 0, "data": {"fid": fid}})
 
         self._json({"status": 404, "message": f"no route {p}"}, 404)
 
@@ -171,9 +228,18 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/baidu/api/list":
             if not self._guard("baidu"):
                 return
-            d = q.get("dir") or "/"
-            items = [{"server_filename": x, "isdir": 1, "size": 0}
-                     for x in sorted(self.state.dirs) if x != "/" and x.rsplit("/", 1)[0] in (d, "")]
+            d = (q.get("dir") or "/").rstrip("/") or "/"
+            items = []
+            for path, meta in sorted(self.state.baidu.items()):
+                if _parent(path) != d:
+                    continue
+                items.append({
+                    "server_filename": _base(path),
+                    "isdir": 1 if meta.get("isdir") else 0,
+                    "size": int(meta.get("size") or 0),
+                    "md5": str(meta.get("md5") or ""),
+                    "fs_id": meta.get("fid"),
+                })
             return self._json({"errno": 0, "list": items})
 
         if p == "/baidu/api/quota":
@@ -194,8 +260,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/cd/1/clouddrive/file/sort":
             if not self._guard("cd"):
                 return
-            fid = q.get("pdir_fid") or "0"
-            items = [] if fid == "0" else []
+            fid = str(q.get("pdir_fid") or "0")
+            path = self.state.cd_fid_dir.get(fid, "/")
+            items = []
+            for dpath, dfid in sorted(self.state.cd_dirs.items()):
+                if dpath != "/" and _parent(dpath) == path:
+                    items.append({"fid": dfid, "file_name": _base(dpath), "size": 0, "dir": True})
+            for fpath, meta in sorted(self.state.cd.items()):
+                if _parent(fpath) == path:
+                    items.append({"fid": meta["fid"], "file_name": _base(fpath),
+                                  "size": int(meta.get("size") or 0), "dir": False})
             return self._json({"status": 0, "code": 0,
                                "data": {"list": items, "metadata": {"_total": len(items)}}})
 

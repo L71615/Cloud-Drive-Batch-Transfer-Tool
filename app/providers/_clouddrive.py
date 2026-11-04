@@ -194,6 +194,40 @@ class CloudDrive(Provider):
         raise ProviderError("转存任务超时（120s）")
 
     # ---------------- 其它 ----------------
+    def _fid_for(self, path: str) -> str:
+        """把绝对路径解析成 fid；不创建任何目录。"""
+        fid = "0"
+        for seg in [s for s in str(path or "").split("/") if s]:
+            key = f"{fid}/{seg}"
+            if key in self._dirs:
+                fid = self._dirs[key]
+                continue
+            found = ""
+            for ch in self._children(fid):
+                if ch.get("dir") and str(ch.get("file_name")) == seg:
+                    found = str(ch.get("fid"))
+                    break
+            if not found:
+                raise ProviderError(f"目录不存在：{path}")
+            self._dirs[key] = found
+            fid = found
+        return fid
+
+    def browse(self, path: str = "/") -> list[dict]:
+        fid = self._fid_for(path or "/")
+        base = str(path or "/").rstrip("/")
+        out = []
+        for ch in self._children(fid):
+            name = str(ch.get("file_name") or "")
+            out.append({
+                "name": name,
+                "path": f"{base}/{name}",
+                "is_dir": bool(ch.get("dir")),
+                "size": int(ch.get("size") or 0),
+                "meta": {"fid": ch.get("fid")},
+            })
+        return out
+
     def list_dir(self, path: str = "0") -> list[Entry]:
         fid = path if path == "0" or path.isdigit() else self.ensure_dir(path)
         return [
@@ -218,3 +252,29 @@ class CloudDrive(Provider):
         except ProviderNotReady as e:
             return {"valid": False, "message": str(e)}
         return {"valid": True, "message": "登录态有效"}
+
+    def diagnose(self, ref: ShareRef) -> list[dict]:
+        steps: list[dict] = []
+        stoken: dict[str, str] = {}
+        self._run_step(steps, "解析链接", lambda: f"share_id={ref.share_id} 提取码={'有' if ref.passcode else '无'}")
+
+        def _token():
+            stoken["v"] = self.share_token(ref)
+            return f"stoken={stoken['v'][:8]}…（长度 {len(stoken['v'])}）"
+        self._run_step(steps, "分享 token", _token)
+
+        def _list():
+            if not stoken:
+                raise ProviderError("上一步没有拿到 stoken，跳过")
+            d = self._page_share(ref, stoken["v"], "0", 1)
+            items = d.get("list") or []
+            total = int((d.get("metadata") or {}).get("_total") or 0)
+            names = [str(x.get("file_name")) for x in items[:5]]
+            return f"根目录 共 {total} 项，本页 {len(items)}：{', '.join(names)}"
+        self._run_step(steps, "列分享根目录（第一页）", _list)
+
+        def _quota():
+            q = self.quota()
+            return f"总 {q['total'] // 1024 ** 3} GB / 已用 {q['used'] // 1024 ** 3} GB"
+        self._run_step(steps, "查询我的容量", _quota)
+        return steps

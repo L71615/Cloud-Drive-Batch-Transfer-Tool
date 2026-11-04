@@ -92,6 +92,23 @@ def main() -> int:
     back = call(base, "/api/tasks/" + new["id"], "GET")["task"]
     ok = sum(1 for i in back["items"] if i["status"] == "done")
     print(f"detail items done={ok}")
+
+    # 目录浏览：转存完成后，用户盘里应能看到 /PanTransfer
+    br = call(base, "/api/browse?provider=baidu&path=%2FPanTransfer&account_id=" + str(acc["id"]))
+    names = [x["name"] for x in br["items"]]
+    print("browse /PanTransfer:", names)
+    assert "a.txt" in names, names
+
+    # 协议诊断：四步全过，且能拿到原始响应
+    dg = call(base, "/api/diag", "POST", {
+        "provider": "baidu",
+        "link": "https://pan.baidu.com/s/1AbCdEf 提取码: x9y8",
+        "account_id": acc["id"],
+    })
+    print("diag:", [(s["name"], s["ok"]) for s in dg["steps"]])
+    assert all(s["ok"] for s in dg["steps"]), dg["steps"]
+    assert dg["raw"], "诊断应记录原始 HTTP 响应"
+    print("raw 请求数:", len(dg["raw"]))
     print("\n✅ 全链路自检通过")
     httpd.shutdown()
     httpd.app.close()

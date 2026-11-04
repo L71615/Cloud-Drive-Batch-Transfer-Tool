@@ -28,6 +28,7 @@ from urllib.parse import urlparse, parse_qs
 from . import __version__
 from .db import Store, now
 from .providers import create, names
+from .providers._http import trace_off, trace_on
 from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 from .tasks import TaskRunner
 
@@ -135,6 +136,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, **self.app.runner.stats()})
         if path == "/api/settings":
             return self._send(200, {"ok": True, "settings": self.app.runner.settings()})
+        if path == "/api/browse":
+            q = parse_qs(u.query)
+            provider = (q.get("provider") or [""])[0]
+            target = (q.get("path") or ["/"])[0]
+            account_id = (q.get("account_id") or [""])[0]
+            cred = (q.get("credential") or [""])[0]
+            if provider not in names():
+                return self._err(400, f"unknown provider: {provider}")
+            if not cred and account_id:
+                row = self.app.store.one(
+                    "SELECT credential FROM accounts WHERE id=? AND provider=?",
+                    (int(account_id), provider),
+                )
+                cred = (row or {}).get("credential", "")
+            try:
+                prov = create(provider, cred)
+                prov.qps = max(prov.qps, 1.0)
+                items = prov.browse(target)
+            except ProviderNotReady as e:
+                return self._err(400, str(e))
+            except (ProviderError, AuthExpired) as e:
+                return self._err(400, f"读取目录失败：{e}")
+            return self._send(200, {"ok": True, "path": target, "items": items})
         if path == "/api/accounts":
             rows = self.app.store.all(
                 "SELECT id,provider,name,created_at FROM accounts ORDER BY id DESC"
@@ -179,6 +203,38 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 result = {"valid": False, "message": f"{type(e).__name__}: {e}"}
             return self._send(200, {"ok": True, **result})
+
+        if path == "/api/diag":
+            provider = str(body.get("provider") or "")
+            if provider not in names():
+                return self._err(400, f"unknown provider: {provider}")
+            cred = str(body.get("credential") or "").strip()
+            if not cred and body.get("account_id"):
+                row = self.app.store.one(
+                    "SELECT credential FROM accounts WHERE id=? AND provider=?",
+                    (int(body["account_id"]), provider),
+                )
+                cred = (row or {}).get("credential", "")
+            link = str(body.get("link") or "").strip()
+            prov = create(provider, cred)
+            prov.qps = max(prov.qps, 1.0)
+            refs = prov.parse_links(link)
+            if not refs:
+                return self._send(200, {
+                    "ok": True,
+                    "steps": [{"name": "解析链接", "ok": False, "ms": 0,
+                               "error": "没有识别到分享链接（检查链接格式）"}],
+                    "raw": [],
+                })
+            ref = refs[0]
+            if str(body.get("passcode") or "").strip():
+                ref.passcode = str(body["passcode"]).strip()
+            sink = trace_on()
+            try:
+                steps = prov.diagnose(ref)
+            finally:
+                trace_off()
+            return self._send(200, {"ok": True, "steps": steps, "raw": sink})
 
         if path == "/api/accounts":
             provider = str(body.get("provider") or "")
