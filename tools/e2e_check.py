@@ -46,6 +46,10 @@ def wait(base: str, task_id: str, timeout: float = 30.0) -> dict:
 
 
 def main() -> int:
+    try:  # Windows 控制台默认 GBK，emoji 会炸
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
     mock = mock_serve(0)
     gateway = f"http://127.0.0.1:{mock.server_address[1]}"
     apply_dev_gateway(gateway)

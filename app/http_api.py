@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from . import __version__
+from .credentials import normalize, validate
 from .db import Store, now
 from .providers import create, names
 from .providers._http import trace_off, trace_on
@@ -141,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
             provider = (q.get("provider") or [""])[0]
             target = (q.get("path") or ["/"])[0]
             account_id = (q.get("account_id") or [""])[0]
-            cred = (q.get("credential") or [""])[0]
+            cred = normalize((q.get("credential") or [""])[0])
             if provider not in names():
                 return self._err(400, f"unknown provider: {provider}")
             if not cred and account_id:
@@ -208,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
             provider = str(body.get("provider") or "")
             if provider not in names():
                 return self._err(400, f"unknown provider: {provider}")
-            cred = str(body.get("credential") or "").strip()
+            cred = normalize(str(body.get("credential") or ""))
             if not cred and body.get("account_id"):
                 row = self.app.store.one(
                     "SELECT credential FROM accounts WHERE id=? AND provider=?",
@@ -238,17 +239,32 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/accounts":
             provider = str(body.get("provider") or "")
-            cred = str(body.get("credential") or "").strip()
             if provider not in names():
                 return self._err(400, f"unknown provider: {provider}")
-            if not cred:
-                return self._err(400, "credential 不能为空")
+            v = validate(provider, str(body.get("credential") or ""))
+            if not v["ok"]:
+                return self._err(400, v["error"])
+            cred = v["cookie"]
             self.app.store.run(
                 "INSERT INTO accounts(provider,name,credential,created_at) VALUES(?,?,?,?)",
                 (provider, str(body.get("name") or provider), cred, now()),
             )
             row = self.app.store.one("SELECT id FROM accounts ORDER BY id DESC LIMIT 1") or {}
             return self._send(200, {"ok": True, "id": row.get("id")})
+
+        if path == "/api/accounts/validate":
+            provider = str(body.get("provider") or "")
+            if provider not in names():
+                return self._err(400, f"unknown provider: {provider}")
+            v = validate(provider, str(body.get("credential") or ""))
+            return self._send(200, {
+                "ok": True,
+                "valid": v["ok"],
+                "message": v["error"] or "格式正确，可以保存",
+                "missing": v["missing"],
+                "cookie": v["cookie"],
+                "count": v.get("count", 0),
+            })
 
         if path == "/api/parse":
             provider = str(body.get("provider") or "")
@@ -271,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, f"unknown provider: {provider}")
             if not links:
                 return self._err(400, "链接不能为空")
-            cred = str(body.get("credential") or "").strip()
+            cred = normalize(str(body.get("credential") or ""))
             if not cred and body.get("account_id"):
                 row = self.app.store.one(
                     "SELECT credential FROM accounts WHERE id=? AND provider=?",

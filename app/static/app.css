@@ -202,3 +202,11 @@ pre.raw{margin:0;max-height:460px;overflow:auto;background:#0b0f14;border:1px so
   border-radius:8px;padding:12px 14px;font-family:ui-monospace,Consolas,monospace;
   font-size:11.5px;line-height:1.6;white-space:pre-wrap;word-break:break-all;color:#c7d2de}
 .tb td.step-detail{font-size:11.5px;color:var(--dim);max-width:420px;word-break:break-all}
+
+/* ---- 登录指引 ---- */
+ol.steps{margin:10px 0 0;padding-left:22px;font-size:12.5px;line-height:1.9;color:#c3ccd8}
+ol.steps li{margin-bottom:2px}
+ol.steps code{background:#0b0f14;border:1px solid var(--line);border-radius:4px;
+  padding:0 5px;font-size:11.5px;font-family:ui-monospace,Consolas,monospace}
+.key-ok{color:var(--ok)}
+.key-bad{color:#f0a29c}

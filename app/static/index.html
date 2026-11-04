@@ -163,12 +163,20 @@ https://drive.uc.cn/s/zyxwvu987654"></textarea>
         </div>
 
         <div class="card">
-          <div class="card-h"><h2>新增登录态</h2><span class="hint">从浏览器 F12 → Network 复制 Cookie 请求头</span></div>
+          <div class="card-h"><h2>怎么拿到 Cookie</h2><span class="hint">浏览器已登录，复制一次即可</span></div>
+          <label class="f">按网盘看步骤</label>
+          <select id="guideProvider"></select>
+          <ol class="steps" id="guideSteps"></ol>
+          <div class="hint-line">Cookie 就是登录凭证，保存在本机 <code class="inline">data/pantransfer.db</code>，不会发往任何第三方服务器；换台机器或退出登录后需要重新复制。</div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h2>新增登录态</h2><span class="hint">整段粘贴即可，会自动清洗</span></div>
           <label class="f">网盘</label>
           <select id="accProvider"></select>
           <label class="f">备注名</label>
           <input id="accName" placeholder="例如：主号 / 小号">
-          <label class="f">Cookie</label>
+          <label class="f">Cookie <em>（可直接粘贴带 “Cookie:” 前缀的整行）</em></label>
           <textarea id="accCookie" style="min-height:74px" placeholder="BDUSS=xxx; STOKEN=yyy"></textarea>
           <div class="row" style="margin-top:12px">
             <button id="btnSaveAcc">保存</button>

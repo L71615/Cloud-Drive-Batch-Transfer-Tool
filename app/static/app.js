@@ -160,12 +160,61 @@
     const credential = $('#accCookie').value.trim();
     if (!credential) { note('#accHint', 'Cookie 不能为空', true); return; }
     try {
-      await post('/api/accounts', { provider, name, credential });
+      const v = await post('/api/accounts/validate', { provider, credential });
+      if (!v.valid) { note('#accHint', v.message, true); return; }
+      await post('/api/accounts', { provider, name, credential: v.cookie });
       $('#accCookie').value = ''; $('#accName').value = '';
-      note('#accHint', '已保存');
+      note('#accHint', `已保存（${v.count} 个字段）`);
       loadAccounts();
       toast('登录态已保存', 'ok');
     } catch (e) { note('#accHint', e.message, true); }
+  }
+
+  /* ---------------- 登录指引 ---------------- */
+  const GUIDE = {
+    baidu: [
+      '浏览器打开 <code>pan.baidu.com</code>，确认右上角能看到自己的头像（已登录状态）。',
+      '按 <code>F12</code> 打开开发者工具，切到 <code>Network</code>（网络）面板。',
+      '在页面上点一下「我的文件」，右侧会出现一批请求。',
+      '点任意一条 <code>pan.baidu.com</code> 的请求 → <code>Headers</code> → <code>Request Headers</code> → 找到 <code>Cookie</code>。',
+      '右键该行选「Copy value」（或手动全选复制），粘贴到下方输入框。',
+      '这段里必须含 <code>BDUSS</code>；没有就是没登录成功、或复制成了 Response Headers。',
+    ],
+    quark: [
+      '浏览器打开 <code>pan.quark.cn</code> 并登录。',
+      '按 <code>F12</code> → <code>Network</code>，点一下左侧「全部文件」刷新目录。',
+      '点任意一条 <code>drive-pc.quark.cn</code> 的请求 → <code>Headers</code> → <code>Request Headers</code> → <code>Cookie</code>。',
+      '整段复制粘贴到下方输入框。',
+      '必须含 <code>__pus</code> 或 <code>__puus</code>，否则是游客态。',
+    ],
+    uc: [
+      '浏览器打开 <code>drive.uc.cn</code> 并登录。',
+      '按 <code>F12</code> → <code>Network</code>，点进任意文件夹让接口发一次请求。',
+      '点任意一条 <code>pc-api.uc.cn</code> 的请求 → <code>Headers</code> → <code>Cookie</code>。',
+      '整段复制粘贴到下方输入框。',
+      '必须含 <code>__pus</code> 或 <code>__puus</code>。',
+    ],
+  };
+
+  function renderGuide(provider) {
+    const steps = GUIDE[provider] || ['先选一个网盘。'];
+    $('#guideSteps').innerHTML = steps.map(s => `<li>${s}</li>`).join('');
+  }
+
+  let cookieTimer = null;
+  function checkCookieSoon() {
+    clearTimeout(cookieTimer);
+    cookieTimer = setTimeout(async () => {
+      const credential = $('#accCookie').value;
+      if (!credential.trim()) { note('#accHint', ''); return; }
+      try {
+        const r = await post('/api/accounts/validate', {
+          provider: $('#accProvider').value, credential,
+        });
+        if (r.valid) note('#accHint', `格式正确：识别到 ${r.count} 个字段`, false);
+        else note('#accHint', r.message, true);
+      } catch (e) { note('#accHint', e.message, true); }
+    }, 350);
   }
 
   /* ---------------- 解析 / 建任务 ---------------- */
@@ -522,8 +571,17 @@
     renderDrives();
     const sel = $('#accProvider');
     sel.innerHTML = '';
-    S.meta.providers.filter(p => p.name !== 'mock')
-      .forEach(p => sel.append(new Option(p.label, p.name)));
+    const real = S.meta.providers.filter(p => p.name !== 'mock');
+    real.forEach(p => sel.append(new Option(p.label, p.name)));
+
+    const gsel = $('#guideProvider');
+    gsel.innerHTML = '';
+    real.forEach(p => gsel.append(new Option(p.label, p.name)));
+    gsel.value = sel.value;
+    renderGuide(gsel.value);
+    gsel.onchange = () => renderGuide(gsel.value);
+    sel.onchange = () => { gsel.value = sel.value; renderGuide(sel.value); checkCookieSoon(); };
+    $('#accCookie').oninput = checkCookieSoon;
 
     await Promise.allSettled([loadAccounts(), loadTasks(), loadSettings()]);
 
