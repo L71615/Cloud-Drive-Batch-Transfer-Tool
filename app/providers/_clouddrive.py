@@ -259,6 +259,34 @@ class CloudDrive(Provider):
         if task_id:
             self._wait_task(str(task_id))
 
+    def _locate(self, target: str, names: list[str]) -> dict[str, str]:
+        """转存后核对真实落点：返回 {文件名: 实际路径}，最多往下看两层。"""
+        base = target.rstrip("/") or "/"
+        want = set(names)
+        found: dict[str, str] = {}
+        try:
+            top = self.browse(base)
+        except ProviderError:
+            return found
+        for it in top:
+            if not it["is_dir"] and it["name"] in want:
+                found.setdefault(it["name"], it["path"])
+        if len(found) >= len(want):
+            return found
+        for it in top:
+            if not it["is_dir"]:
+                continue
+            try:
+                sub = self.browse(it["path"])
+            except ProviderError:
+                continue
+            for s in sub:
+                if not s["is_dir"] and s["name"] in want:
+                    found.setdefault(s["name"], s["path"])
+            if len(found) >= len(want):
+                break
+        return found
+
     def transfer_batch(self, ref: ShareRef, entries: list[Entry], target: str) -> list[str]:
         """批量转存：按「分享内的真实父目录」分组，一组一次 save。
 
@@ -278,12 +306,14 @@ class CloudDrive(Provider):
             groups.setdefault(key, []).append(idx)
 
         out = [""] * len(entries)
+        done_idx: list[int] = []
         first_err = ""
         for (pdir, query), idxs in groups.items():
             group = [entries[i] for i in idxs]
             stoken = self.share_token(ref)
             try:
                 self._save_group(ref, stoken, pdir, group, dest, query=query)
+                done_idx.extend(idxs)
             except ProviderError as exc:
                 if not self._is_token_error(exc):
                     first_err = first_err or str(exc)
@@ -299,6 +329,7 @@ class CloudDrive(Provider):
                         ref, stoken, pdir, group, dest,
                         tokens=[fresh.get(str(e.meta.get("fid"))) or str(e.meta.get("token") or "")
                                 for e in group])
+                    done_idx.extend(idxs)
                 except ProviderError as exc2:
                     first_err = first_err or str(exc2)
                     for i, one in zip(idxs, group):
@@ -313,10 +344,17 @@ class CloudDrive(Provider):
                         except ProviderError as exc3:
                             errs[i] = str(exc3)
                             continue
-                        out[i] = f"{target.rstrip('/')}/{one.path.rsplit('/', 1)[-1]}"
-                    continue
-            for i, one in zip(idxs, group):
-                out[i] = f"{target.rstrip('/')}/{one.path.rsplit('/', 1)[-1]}"
+                        done_idx.append(i)
+        if done_idx:
+            # save 不一定把文件直接放在目标目录：UC 在批量提交时会自动建一层
+            # 分享顶层目录（实测 /3184/… 的文件落到了 <目标>/3184/ 下）。
+            # 落点以实际列目录为准，否则明细里的 dst、同名跳过都会记错。
+            names = [entries[i].path.rsplit("/", 1)[-1] for i in done_idx]
+            landed = self._locate(target, names)
+            base = target.rstrip("/") or "/"
+            for i in done_idx:
+                name = entries[i].path.rsplit("/", 1)[-1]
+                out[i] = landed.get(name) or f"{base}/{name}"
         if not any(out) and first_err:
             raise ProviderError(first_err)
         return out
