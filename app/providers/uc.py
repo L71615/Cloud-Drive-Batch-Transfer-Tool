@@ -10,9 +10,11 @@ import re
 
 from . import register
 from ._clouddrive import CloudDrive
-from .base import ShareRef
+from .base import ShareRef, clean_text
 
-LINK_RE = re.compile(r"https?://(?:drive|fast)\.uc\.cn/s/([0-9A-Za-z]{6,})")
+LINK_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:drive|fast|pc-api)\.uc\.cn/s/([0-9A-Za-z]{6,})")
+LOOSE_RE = re.compile(r"(?:drive|fast|pc-api)\.uc\.cn[^\s]*?/s/([0-9A-Za-z]{6,})")
+SLASH_RE = re.compile(r"(?:^|[\s：:，,（(【\[<])/s/([0-9A-Za-z]{6,})")
 PWD_RE = re.compile(r"(?:pwd|passcode|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
 
 
@@ -32,15 +34,27 @@ class UcProvider(CloudDrive):
     def parse_links(self, text: str) -> list[ShareRef]:
         out: list[ShareRef] = []
         seen: set[str] = set()
-        for line in str(text or "").splitlines():
+        for line in clean_text(text).splitlines():
             line = line.strip()
             if not line:
                 continue
             m = PWD_RE.search(line)
             pwd = m.group(1) if m else ""
-            for m in LINK_RE.finditer(line):
-                if m.group(1) in seen:
-                    continue
+            hit = False
+            for rx in (LINK_RE, LOOSE_RE):
+                for m in rx.finditer(line):
+                    sid = m.group(1)
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    out.append(ShareRef(provider=self.name, share_id=sid, url=m.group(0), passcode=pwd))
+                    hit = True
+                if hit:
+                    break
+            if hit:
+                continue
+            m = SLASH_RE.search(line)
+            if m and m.group(1) not in seen:
                 seen.add(m.group(1))
-                out.append(ShareRef(provider=self.name, share_id=m.group(1), url=m.group(0), passcode=pwd))
+                out.append(ShareRef(provider=self.name, share_id=m.group(1), passcode=pwd))
         return out

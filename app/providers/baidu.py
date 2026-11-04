@@ -14,12 +14,14 @@ from urllib.parse import unquote
 
 from . import register
 from ._http import Client
-from .base import AuthExpired, Entry, Provider, ProviderError, ProviderNotReady, ShareRef
+from .base import AuthExpired, Entry, Provider, ProviderError, ProviderNotReady, ShareRef, clean_text
 
 BASE = "https://pan.baidu.com"
 APP_ID = "250528"
 
-LINK_RE = re.compile(r"https?://pan\.baidu\.com/s/([0-9A-Za-z_\-]{4,})")
+LINK_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:pan|yun)\.baidu\.com/s/([0-9A-Za-z_\-]{4,})")
+SURL_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:pan|yun)\.baidu\.com/share/init\?(?:surl|shorturl)=([0-9A-Za-z_\-]{4,})")
+SLASH_RE = re.compile(r"(?:^|[\s：:，,（(【\[<])/s/([0-9A-Za-z_\-]{4,})")
 PWD_RE = re.compile(r"(?:pwd|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
 
 MAX_DEPTH = 8
@@ -85,18 +87,34 @@ class BaiduProvider(Provider):
     def parse_links(self, text: str) -> list[ShareRef]:
         out: list[ShareRef] = []
         seen: set[str] = set()
-        for line in str(text or "").splitlines():
+        for line in clean_text(text).splitlines():
             line = line.strip()
             if not line:
                 continue
             m = PWD_RE.search(line)
             pwd = m.group(1) if m else ""
+            before = len(out)
             for m in LINK_RE.finditer(line):
                 surl = m.group(1)
                 if surl in seen:
                     continue
                 seen.add(surl)
                 out.append(ShareRef(provider=self.name, share_id=surl, url=m.group(0), passcode=pwd))
+            # 老式链接 pan.baidu.com/share/init?surl=AbCdEf：接口要的是带前导 1 的 shorturl
+            for m in SURL_RE.finditer(line):
+                surl = m.group(1)
+                short = surl if surl.startswith("1") else "1" + surl
+                if short in seen:
+                    continue
+                seen.add(short)
+                out.append(ShareRef(provider=self.name, share_id=short, url=m.group(0), passcode=pwd))
+            if len(out) > before:
+                continue
+            # 宽松兜底：只粘了 "/s/xxxx" 也能用（用户已明确选了百度）
+            m = SLASH_RE.search(line)
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                out.append(ShareRef(provider=self.name, share_id=m.group(1), passcode=pwd))
         return out
 
     def _verify(self, ref: ShareRef) -> str:

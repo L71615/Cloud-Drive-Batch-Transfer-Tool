@@ -5,6 +5,17 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 
+# 用户从聊天软件/网页里复制出来的链接常夹带零宽字符和全角空格，
+# 这些看不见的字符会让正则匹配失败，先在这里统一清掉。
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff\u00a0\u3000"), None)
+_DASHES = str.maketrans({"\uff0f": "/", "\uff1a": ":", "\uff1f": "?", "\uff1d": "="})
+
+
+def clean_text(text: str) -> str:
+    """去掉零宽字符、NBSP、全角空格，并把全角 URL 分隔符转成半角。"""
+    out = str(text or "").translate(_INVISIBLE)
+    return out.translate(_DASHES)
+
 
 class ProviderNotReady(RuntimeError):
     """适配器尚未按 docs/spec 配置好端点或凭据。"""

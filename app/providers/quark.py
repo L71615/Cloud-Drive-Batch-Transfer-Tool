@@ -10,9 +10,13 @@ import re
 
 from . import register
 from ._clouddrive import CloudDrive
-from .base import ShareRef
+from .base import ShareRef, clean_text
 
-LINK_RE = re.compile(r"https?://pan\.quark\.cn/s/([0-9A-Za-z]{6,})")
+LINK_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:pan|drive-pc)\.quark\.cn/s/([0-9A-Za-z]{6,})")
+# 宽松模式：域名后面可能跟端口、# 或查询串，仍从里面捞出 /s/<id>
+LOOSE_RE = re.compile(r"(?:pan|drive-pc)\.quark\.cn[^\s]*?/s/([0-9A-Za-z]{6,})")
+# 只粘了后半段的 "/s/xxxx"
+SLASH_RE = re.compile(r"(?:^|[\s：:，,（(【\[<])/s/([0-9A-Za-z]{6,})")
 PWD_RE = re.compile(r"(?:pwd|passcode|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", re.I)
 BARE_RE = re.compile(r"^([0-9A-Za-z]{6,})$")
 
@@ -36,7 +40,7 @@ class QuarkProvider(CloudDrive):
 
 def parse_share_links(text: str, provider: str = "quark") -> list[ShareRef]:
     out: list[ShareRef] = []
-    for line in str(text or "").splitlines():
+    for line in clean_text(text).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -44,9 +48,18 @@ def parse_share_links(text: str, provider: str = "quark") -> list[ShareRef]:
         m = PWD_RE.search(line)
         if m:
             pwd = m.group(1)
-        for m in LINK_RE.finditer(line):
-            out.append(ShareRef(provider=provider, share_id=m.group(1), url=m.group(0), passcode=pwd))
-        if not LINK_RE.search(line):
+        hit = False
+        for rx in (LINK_RE, LOOSE_RE):
+            for m in rx.finditer(line):
+                out.append(ShareRef(provider=provider, share_id=m.group(1), url=m.group(0), passcode=pwd))
+                hit = True
+            if hit:
+                break
+        if not hit:
+            m = SLASH_RE.search(line)
+            if m:
+                out.append(ShareRef(provider=provider, share_id=m.group(1), passcode=pwd))
+                continue
             m = BARE_RE.match(line)
             if m:
                 out.append(ShareRef(provider=provider, share_id=m.group(1), passcode=pwd))

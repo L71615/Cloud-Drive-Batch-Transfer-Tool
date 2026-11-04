@@ -296,7 +296,11 @@
         body.append(tr);
       });
       card.hidden = r.count === 0;
-      note('#hint', r.count ? `解析到 ${r.count} 个分享，可以开始转存` : '没有识别到该网盘的分享链接', r.count === 0);
+      if (r.count) {
+        note('#hint', `解析到 ${r.count} 个分享，可以开始转存`, false);
+      } else {
+        note('#hint', r.hint || `没有识别到「${providerInfo(S.provider).label}」的分享链接——检查链接是否复制完整`, true);
+      }
     } catch (e) { note('#hint', e.message, true); }
   }
 

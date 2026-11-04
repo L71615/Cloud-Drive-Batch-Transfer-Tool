@@ -309,15 +309,32 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/parse":
             provider = str(body.get("provider") or "")
+            text = str(body.get("text") or "")
             try:
                 prov = create(provider, "")
             except KeyError:
                 return self._err(400, f"unknown provider: {provider}")
-            refs = prov.parse_links(str(body.get("text") or ""))
+            refs = prov.parse_links(text)
+            # 选错网盘是最常见的原因：这里顺手看别的网盘能不能认出来，直接告诉用户
+            hint = ""
+            if not refs:
+                for other in names():
+                    if other == provider or other == "mock":
+                        continue
+                    try:
+                        other_refs = create(other, "").parse_links(text)
+                    except Exception:  # noqa: BLE001
+                        other_refs = []
+                    if other_refs:
+                        label = create(other, "").label
+                        hint = (f"这看起来是「{label}」的链接，"
+                                f"请把上方的网盘切换成{label}再试")
+                        break
             return self._send(200, {
                 "ok": True,
                 "count": len(refs),
                 "refs": [r.__dict__ for r in refs],
+                "hint": hint,
             })
 
         if path == "/api/tasks":
