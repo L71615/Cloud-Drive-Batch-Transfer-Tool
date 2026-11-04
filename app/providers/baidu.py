@@ -142,33 +142,41 @@ class BaiduProvider(Provider):
 
     def list_share(self, ref: ShareRef) -> list[Entry]:
         meta = self.share_meta(ref)
-        out: list[Entry] = []
+        count = 0
         queue: list[tuple[str, str, int]] = [("/", "", 0)]
-        while queue and len(out) < MAX_ENTRIES:
+        while queue and count < MAX_ENTRIES:
             dir_path, prefix, depth = queue.pop(0)
             if depth > MAX_DEPTH:
                 continue
             page = 1
+            seen_fids: set[str] = set()
             while True:
                 items, n = self._page_share(ref, meta, dir_path, page)
+                if not items:
+                    break
+                fids = {str(it.get("fs_id") or "") for it in items}
+                if fids and fids <= seen_fids:
+                    break
+                seen_fids |= fids
                 for it in items:
                     name = str(it.get("server_filename") or "")
                     path = f"{prefix}/{name}" if prefix else f"/{name}"
                     if it.get("isdir"):
                         queue.append((str(it.get("path") or f"{dir_path.rstrip('/')}/{name}"), path, depth + 1))
                         continue
-                    out.append(Entry(
+                    yield Entry(
                         path=path,
                         size=int(it.get("size") or 0),
                         digest=str(it.get("md5") or ""),
                         meta={"fs_id": it.get("fs_id"), "isdir": False},
-                    ))
-                    if len(out) >= MAX_ENTRIES:
+                    )
+                    count += 1
+                    if count >= MAX_ENTRIES:
                         break
                 if n < 100:
                     break
                 page += 1
-        return out
+        return
 
     # ---------------- 我的目录 ----------------
     def _list_dir(self, path: str) -> list[dict]:

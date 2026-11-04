@@ -54,7 +54,7 @@ class AdapterTest(unittest.TestCase):
     def test_baidu_full_flow(self):
         p = self._p(BaiduProvider)
         ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: x9y8")[0]
-        entries = p.list_share(ref)
+        entries = list(p.list_share(ref))
         paths = sorted(e.path for e in entries)
         self.assertEqual(paths, ["/a.txt", "/b.bin", "/相册/c.txt"], "应递归展开子目录")
 
@@ -67,7 +67,7 @@ class AdapterTest(unittest.TestCase):
         p = self._p(BaiduProvider)
         ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: 0000")[0]
         with self.assertRaises(ProviderError):
-            p.list_share(ref)
+            list(p.list_share(ref))
 
     def test_baidu_bad_cookie(self):
         p = self._p(BaiduProvider, cookie="BDUSS=BAD")
@@ -79,7 +79,7 @@ class AdapterTest(unittest.TestCase):
     def test_quark_full_flow(self):
         p = self._p(QuarkProvider, cookie="__pus=abc")
         ref = p.parse_links("https://pan.quark.cn/s/a1b2c3d4e5f6")[0]
-        entries = p.list_share(ref)
+        entries = list(p.list_share(ref))
         self.assertEqual(sorted(e.path for e in entries), ["/a.txt", "/相册/c.txt"])
         self.assertTrue(all(e.meta.get("token") for e in entries), "每条都要带 share token")
 
@@ -92,7 +92,7 @@ class AdapterTest(unittest.TestCase):
         ref = p.parse_links("https://pan.quark.cn/s/zyxwvu987654")[0]
         ref.passcode = "0000"
         with self.assertRaises(ProviderError):
-            p.list_share(ref)
+            list(p.list_share(ref))
 
     # ---------------- UC ----------------
     def test_uc_parse_and_list(self):
@@ -100,7 +100,7 @@ class AdapterTest(unittest.TestCase):
         refs = p.parse_links("https://drive.uc.cn/s/a1b2c3d4e5f6 提取码: 9a8b\nhttps://fast.uc.cn/s/a1b2c3d4e5f6")
         self.assertEqual(len(refs), 1)
         self.assertEqual(refs[0].passcode, "9a8b")
-        entries = p.list_share(refs[0])
+        entries = list(p.list_share(refs[0]))
         self.assertIn("/相册/c.txt", [e.path for e in entries])
 
     def test_uc_bad_cookie(self):
@@ -112,7 +112,7 @@ class AdapterTest(unittest.TestCase):
     def test_baidu_browse_after_transfer(self):
         p = self._p(BaiduProvider)
         ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: x9y8")[0]
-        entries = p.list_share(ref)
+        entries = list(p.list_share(ref))
         p.transfer(ref, entries[0], "/浏览测试")
         top = [x["name"] for x in p.browse("/")]
         self.assertIn("浏览测试", top)
@@ -125,7 +125,7 @@ class AdapterTest(unittest.TestCase):
     def test_quark_browse_after_transfer(self):
         p = self._p(QuarkProvider, cookie="__pus=abc")
         ref = p.parse_links("https://pan.quark.cn/s/a1b2c3d4e5f6")[0]
-        entries = p.list_share(ref)
+        entries = list(p.list_share(ref))
         p.transfer(ref, entries[0], "/浏览测试")
         top = [x["name"] for x in p.browse("/")]
         self.assertIn("浏览测试", top)

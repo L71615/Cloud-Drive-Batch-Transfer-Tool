@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             share = CD_SHARE.get(str(body.get("pwd_id")))
             if not share:
-                return self._json({"status": 41004, "code": 41004, "message": "分享不存在"})
+                return self._json({"status": 41006, "code": 41006, "message": "分享不存在"})
             if share["pwd"] and body.get("passcode") != share["pwd"]:
                 return self._json({"status": 41005, "code": 41005, "message": "提取码错误"})
             return self._json({"status": 0, "code": 0, "data": {"stoken": "st-1"}})

@@ -22,6 +22,7 @@ from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 
 TERMINAL = {"done", "failed", "canceled"}
 MAX_ATTEMPTS = 3
+LISTING_MAX = 600  # 秒；列目录整体上限，超过就报错而不是无限等待
 
 DEFAULT_SETTINGS = {
     "concurrency": 2,
@@ -224,16 +225,37 @@ class TaskRunner:
             if not refs:
                 raise ProviderNotReady("没有解析到分享链接，请检查粘贴内容")
 
-            # listing
+            # listing：边读边报进度，界面不会一直停在 0/0
             entries: list[tuple] = []
+            seen = 0
+            list_start = time.time()
             for ref in refs:
                 if self._is_paused(task_id) or self._is_canceled(task_id):
                     return
                 self._set_status(task_id, "listing")
-                for e in prov.list_share(ref):
-                    entries.append((ref, e))
+                gen = prov.list_share(ref)
+                try:
+                    for e in gen:
+                        entries.append((ref, e))
+                        seen += 1
+                        if seen == 1 or seen % 10 == 0:
+                            self.store.run(
+                                "UPDATE tasks SET total=?,updated_at=? WHERE id=?",
+                                (seen, now(), task_id),
+                            )
+                        if time.time() - list_start > LISTING_MAX:
+                            raise ProviderError(
+                                f"读取目录超过 {LISTING_MAX // 60} 分钟仍未完成"
+                                f"（已发现 {seen} 个文件），请改用「协议诊断」逐步定位"
+                            )
+                finally:
+                    closer = getattr(gen, "close", None)
+                    if closer:
+                        closer()
             if not entries:
-                raise ProviderNotReady("分享内没有可用文件")
+                raise ProviderNotReady(
+                    "分享内没有可用文件（若分享里确有内容，请到「协议诊断」用同一链接查看原始响应）"
+                )
 
             self.store.run("UPDATE tasks SET total=?,updated_at=? WHERE id=?", (len(entries), now(), task_id))
             self._set_status(task_id, "transferring")

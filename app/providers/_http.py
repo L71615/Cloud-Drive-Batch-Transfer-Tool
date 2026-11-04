@@ -101,9 +101,28 @@ class Client:
                 _record(method, url, obj)
                 return obj
             except urllib.error.HTTPError as e:
+                text = ""
+                try:
+                    text = e.read().decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    pass
+                obj: object = text
+                try:
+                    obj = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    obj = text
+                _record(method, url, obj if isinstance(obj, (dict, list)) else f"HTTP {e.code} {text[:300]}")
+                msg, code = "", None
+                if isinstance(obj, dict):
+                    msg = str(obj.get("message") or obj.get("error_msg") or obj.get("error") or "")
+                    code = obj.get("code") if obj.get("code") is not None else obj.get("errno")
                 if e.code in (401, 403):
-                    _record(method, url, f"HTTP {e.code}")
-                    raise AuthExpired(f"{self.provider}: http {e.code}") from e
+                    extra = f" {msg}" if msg else ""
+                    raise AuthExpired(f"{self.provider}: http {e.code}{extra}") from e
+                if 400 <= e.code < 500 and e.code != 429:
+                    detail = msg or text[:120] or "no body"
+                    suffix = f"（code={code}）" if code is not None else ""
+                    raise ProviderError(f"{self.provider}: http {e.code} {detail}{suffix}") from e
                 last = e
             except (urllib.error.URLError, TimeoutError) as e:
                 last = e

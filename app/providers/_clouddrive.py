@@ -19,6 +19,18 @@ MAX_ENTRIES = 5000
 
 ERR_OK = (0, 200, None)
 
+# 云盘类接口的常见业务码 → 人话（写进任务错误，界面直接可读）
+ERR_TEXT = {
+    31001: "登录态已失效，请重新登录",
+    31023: "请求参数被拒绝",
+    31066: "文件数量超出限制",
+    41004: "提取码错误",
+    41005: "该分享需要提取码",
+    41006: "分享不存在或已取消",
+    41008: "转存数量超出限制",
+    41020: "该分享不允许转存",
+}
+
 
 class CloudDrive(Provider):
     """夸克/UC 的通用实现。"""
@@ -66,7 +78,9 @@ class CloudDrive(Provider):
         status = data.get("status")
         if status not in ERR_OK:
             code = data.get("code")
-            msg = data.get("message") or "接口返回错误"
+            raw = data.get("message") or ""
+            # 服务端的中文提示已经足够具体，优先用它；没有才退回本地码表
+            msg = raw or ERR_TEXT.get(code) or "接口返回错误"
             if code in (31001, 31023, 401) or status in (401, -1):
                 from .base import AuthExpired
                 raise AuthExpired(f"{self.name}: {msg}（code={code}）")
@@ -87,7 +101,7 @@ class CloudDrive(Provider):
         self._stoken[ref.share_id] = stoken
         return stoken
 
-    def _page_share(self, ref: ShareRef, stoken: str, pdir: str, page: int, size: int = 50) -> dict:
+    def _page_share(self, ref: ShareRef, stoken: str, pdir: str, page: int, size: int = 100) -> dict:
         return self._api(self.P_DETAIL, params={
             "pwd_id": ref.share_id, "stoken": stoken, "pdir_fid": pdir, "force": "0",
             "_page": page, "_size": size,
@@ -97,34 +111,43 @@ class CloudDrive(Provider):
 
     def list_share(self, ref: ShareRef) -> list[Entry]:
         stoken = self.share_token(ref)
-        out: list[Entry] = []
+        count = 0
         queue: list[tuple[str, str, int]] = [("0", "", 0)]
-        while queue and len(out) < MAX_ENTRIES:
+        while queue and count < MAX_ENTRIES:
             pdir, prefix, depth = queue.pop(0)
             if depth > MAX_DEPTH:
                 continue
             page = 1
+            size = 100
+            seen_fids: set[str] = set()
             while True:
-                d = self._page_share(ref, stoken, pdir, page)
-                for it in d.get("list") or []:
+                d = self._page_share(ref, stoken, pdir, page, size)
+                items = d.get("list") or []
+                # 有些分享接口忽略 _page 参数，同一页会被反复返回：用 fid 集合识别并跳出
+                fids = {str(it.get("fid") or "") for it in items}
+                if fids and fids <= seen_fids:
+                    break
+                seen_fids |= fids
+                for it in items:
                     name = str(it.get("file_name") or "")
                     path = f"{prefix}/{name}" if prefix else f"/{name}"
                     if it.get("dir"):
                         queue.append((str(it.get("fid")), path, depth + 1))
                         continue
-                    out.append(Entry(
+                    yield Entry(
                         path=path,
                         size=int(it.get("size") or 0),
                         digest=str(it.get("fid") or ""),
                         meta={"fid": it.get("fid"), "token": it.get("share_fid_token")},
-                    ))
-                    if len(out) >= MAX_ENTRIES:
+                    )
+                    count += 1
+                    if count >= MAX_ENTRIES:
                         break
                 total = int((d.get("metadata") or {}).get("_total") or 0)
-                if not total or page * 50 >= total:
+                if not total or page * size >= total or not items:
                     break
                 page += 1
-        return out
+        return
 
     # ---------------- 我的目录 ----------------
     def _children(self, pdir: str, size: int = 200) -> list[dict]:
