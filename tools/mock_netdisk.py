@@ -98,6 +98,22 @@ def _base(p: str) -> str:
     return (p or "").rstrip("/").rsplit("/", 1)[-1]
 
 
+def _rel_path(tree: dict, item: dict) -> str:
+    """条目在分享内的相对路径（跟着 pdir_fid 往上走），如 /相册/c.txt。"""
+    parts: list[str] = []
+    cur: dict | None = item
+    seen: set[str] = set()
+    while cur is not None:
+        parts.append(str(cur.get("file_name") or ""))
+        pf = str(cur.get("pdir_fid") or "0")
+        if pf == "0" or pf in seen:
+            break
+        seen.add(pf)
+        cur = next((x for items in tree.values() for x in items
+                    if str(x.get("fid")) == pf), None)
+    return "/" + "/".join(reversed([p for p in parts if p]))
+
+
 class State:
     """一次进程内的"用户网盘"模型：够用来验证列目录 / 建目录 / 转存落盘。"""
 
@@ -258,10 +274,19 @@ class Handler(BaseHTTPRequestHandler):
                 src = next((x for items in tree.values() for x in items
                             if str(x.get("fid")) == str(fid)), {})
                 name = str(src.get("file_name") or "unknown")
-                path = (dpath.rstrip("/") + "/" + name) if dpath != "/" else "/" + name
+                # 真实 UC 会把分享内的目录结构原样重建在目标目录下
+                # （/相册/c.txt → <目标>/相册/c.txt），这里照做，否则
+                # "按完整路径判重"在自检里看不出问题。
+                rel = _rel_path(tree, src).lstrip("/")
+                base = dpath.rstrip("/")
+                path = f"{base}/{rel}" if base else f"/{rel}"
                 st.cd.setdefault(path, {
                     "size": int(src.get("size") or 0), "fid": st.new_fid("cf"),
                 })
+                parents = path.rsplit("/", 1)[0] or "/"
+                if parents != "/" and parents not in st.cd_dirs.values():
+                    st.cd_dirs.setdefault(parents, st.new_fid("cd"))
+                    st.cd_fid_dir.setdefault(st.cd_dirs[parents], parents)
                 dst.append({"path": path, "fid": st.cd[path]["fid"]})
             st.saves.append({**body, "dst": dst})
             return self._json({"status": 0, "code": 0, "data": {"task_id": "tk-1"}})

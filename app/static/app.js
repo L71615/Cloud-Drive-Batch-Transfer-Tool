@@ -338,6 +338,7 @@
     pending: ['排队中', 'wait'], resolving: ['解析链接', 'run'], listing: ['读取目录', 'run'],
     transferring: ['转存中', 'run'], verifying: ['校验中', 'run'], done: ['已完成', 'ok'],
     failed: ['失败', 'bad'], paused: ['已暂停', 'wait'], canceled: ['已取消', 'bad'],
+    skipped: ['跳过', 'wait'],
   };
   const pill = (s) => {
     const [txt, cls] = STATUS[s] || [s, ''];
@@ -348,9 +349,10 @@
   // total = 分享内已发现的文件数（一条链接可能含成百上千个文件），不是链接数
   function progressText(t) {
     const fail = t.failed ? ` · 失败 ${t.failed}` : '';
+    const skip = t.skipped ? ` · 跳过 ${t.skipped}` : '';
     if (t.status === 'listing' && !t.done) return `正在读取目录 · 已发现 ${t.total} 个文件`;
-    if (t.status === 'transferring') return `已转存 ${t.done}/${t.total}${fail}`;
-    return `${t.done}/${t.total}${fail}`;
+    if (t.status === 'transferring') return `已转存 ${t.done}/${t.total}${skip}${fail}`;
+    return `${t.done}/${t.total}${skip}${fail}`;
   }
 
   async function loadTasks() {

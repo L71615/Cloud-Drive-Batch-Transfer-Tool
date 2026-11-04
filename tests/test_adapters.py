@@ -175,8 +175,12 @@ class AdapterTest(unittest.TestCase):
         dsts = p.transfer_batch(ref, entries, "/混合目录")
         self.assertEqual(len(dsts), 2)
         self.assertTrue(all(dsts), f"两条都应转存成功：{dsts}")
-        landed = sorted(x["name"] for x in p.browse("/混合目录"))
-        self.assertEqual(landed, ["a.txt", "c.txt"])
+        # 落点保留分享内的目录结构：/a.txt 在根，/相册/c.txt 落到 /混合目录/相册/
+        self.assertEqual(sorted(dsts), ["/混合目录/a.txt", "/混合目录/相册/c.txt"])
+        top = sorted(x["name"] for x in p.browse("/混合目录"))
+        self.assertEqual(top, ["a.txt", "相册"])
+        sub = sorted(x["name"] for x in p.browse("/混合目录/相册"))
+        self.assertEqual(sub, ["c.txt"])
 
     def test_quark_save_rejects_query_fid_as_pdir(self):
         """回归：save 的 pdir_fid 传列目录用的相对 fid（根为 "0"）必须被拒。
@@ -236,7 +240,9 @@ class AdapterTest(unittest.TestCase):
             tid2 = runner.create_task("quark", link, "/Dedup", cred)
             second = self._wait(runner, tid2)
             self.assertEqual(second["status"], "done", second.get("error"))
-            self.assertEqual(second["done"], n1, "second run must count all files as done")
+            # 第二次全部命中"同名同大小"，记为跳过而不是 done——数字要诚实
+            self.assertEqual(second["done"], 0, "nothing new should be written")
+            self.assertEqual(second["skipped"], n1, "all files should be counted as skipped")
             self.assertEqual(second["failed"], 0)
 
             p = self._p(QuarkProvider, cookie=cred)

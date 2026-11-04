@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks(
     total       INTEGER NOT NULL DEFAULT 0,
     done        INTEGER NOT NULL DEFAULT 0,
     failed      INTEGER NOT NULL DEFAULT 0,
+    skipped     INTEGER NOT NULL DEFAULT 0,
     error       TEXT    NOT NULL DEFAULT '',
     links       TEXT    NOT NULL DEFAULT '',
     credential  TEXT    NOT NULL DEFAULT '',
@@ -73,6 +74,7 @@ class Store:
         for col, ddl in (
             ("links", "ALTER TABLE tasks ADD COLUMN links TEXT NOT NULL DEFAULT ''"),
             ("credential", "ALTER TABLE tasks ADD COLUMN credential TEXT NOT NULL DEFAULT ''"),
+            ("skipped", "ALTER TABLE tasks ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0"),
         ):
             if col not in cols:
                 self.run(ddl)

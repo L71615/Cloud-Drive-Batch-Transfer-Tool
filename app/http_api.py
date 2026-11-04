@@ -183,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tasks":
             limit = min(int(parse_qs(u.query).get("limit", ["100"])[0]), 500)
             rows = self.app.store.all(
-                "SELECT id,provider,target,status,total,done,failed,error,"
+                "SELECT id,provider,target,status,total,done,failed,skipped,error,"
                 " links<>'' AS has_links, created_at,updated_at"
                 " FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
             )

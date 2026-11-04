@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 
 from ._http import Client
@@ -346,15 +347,21 @@ class CloudDrive(Provider):
                             continue
                         done_idx.append(i)
         if done_idx:
-            # save 不一定把文件直接放在目标目录：UC 在批量提交时会自动建一层
-            # 分享顶层目录（实测 /3184/… 的文件落到了 <目标>/3184/ 下）。
-            # 落点以实际列目录为准，否则明细里的 dst、同名跳过都会记错。
-            names = [entries[i].path.rsplit("/", 1)[-1] for i in done_idx]
-            landed = self._locate(target, names)
-            base = target.rstrip("/") or "/"
+            # 落点可以算出来，不必每次列目录：UC 会把分享内的目录结构原样重建在
+            # 目标目录下（实测 /3184/解压码.7z → <目标>/3184/解压码.7z），
+            # 所以 dst = 目标 + 条目在分享内的路径。
+            # 之前每批都 _locate() 扫一遍目标目录（含所有子目录），文件一多就变成
+            # O(文件数²) 的请求量，20 个文件的一批要十几秒，看着就像"转存不完了"。
+            base = target.rstrip("/") or ""
             for i in done_idx:
-                name = entries[i].path.rsplit("/", 1)[-1]
-                out[i] = landed.get(name) or f"{base}/{name}"
+                out[i] = f"{base}{entries[i].path}"
+            if os.environ.get("PANTRANSFER_VERIFY_LOCATE") == "1":
+                names = [entries[i].path.rsplit("/", 1)[-1] for i in done_idx]
+                landed = self._locate(target, names)
+                for i in done_idx:
+                    name = entries[i].path.rsplit("/", 1)[-1]
+                    if landed.get(name):
+                        out[i] = landed[name]
         if not any(out) and first_err:
             raise ProviderError(first_err)
         return out

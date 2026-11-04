@@ -24,6 +24,31 @@ TERMINAL = {"done", "failed", "canceled"}
 MAX_ATTEMPTS = 3
 SHARE_MAX = 1800   # 秒；单条分享的处理上限（读目录 + 转存），到时才算真的卡住
 BATCH_SIZE = 20    # 每批转存的文件数（一次 save 提交多个 fid）
+WALK_DEPTH = 4     # 扫目标目录判重时往下看几层
+WALK_MAX = 20000   # 扫目标目录判重时最多记多少个文件
+
+
+def _walk_files(prov, root: str):
+    """递归列出目标目录里的文件全路径，用于判断"这个文件是不是已经在了"。
+
+    只在任务开始时走一遍：网盘里落点会保留分享内的目录结构，所以只能按完整
+    路径比，不能按文件名比。层数与总数都有上限，避免超大目录把任务卡住。
+    """
+    stack = [(root.rstrip("/") or "/", 0)]
+    n = 0
+    while stack and n < WALK_MAX:
+        path, depth = stack.pop()
+        try:
+            items = prov.browse(path)
+        except Exception:  # noqa: BLE001 - 目录不存在/接口不支持都当作空
+            continue
+        for it in items:
+            if it.get("is_dir"):
+                if depth < WALK_DEPTH:
+                    stack.append((it["path"], depth + 1))
+            else:
+                n += 1
+                yield it["path"]
 
 DEFAULT_SETTINGS = {
     "concurrency": 2,
@@ -140,7 +165,7 @@ class TaskRunner:
 
     def view(self, task_id: str) -> dict | None:
         t = self.store.one(
-            "SELECT id,provider,target,status,total,done,failed,error,links,"
+            "SELECT id,provider,target,status,total,done,failed,skipped,error,links,"
             "created_at,updated_at FROM tasks WHERE id=?", (task_id,),
         )
         if not t:
@@ -246,12 +271,14 @@ class TaskRunner:
             if not refs:
                 raise ProviderNotReady("没有解析到分享链接，请检查粘贴内容")
 
-            # 目标目录里已有同名的文件就直接算完成：重跑、重试、重复粘贴时
-            # 不会在网盘里堆出一串 xxx(1).mp4、xxx(2).mp4
+            # 目标目录里"同一个路径"已经有文件就跳过：重跑/重试/重复粘贴时不会
+            # 在网盘里堆一串 xxx(1).mp4。判定用完整路径而不是文件名——不同分享
+            # 里同名不同内容的文件（每个资源都带一样的教程/说明）很常见，按名字
+            # 跳会让任务显示成功、盘里却没东西。
             existing: set[str] = set()
             try:
-                for it in prov.list_dir(task["target"]) or []:
-                    existing.add(it.path.rsplit("/", 1)[-1])
+                for it in _walk_files(prov, task["target"]):
+                    existing.add(it)
             except Exception:  # noqa: BLE001 - 目录不存在或接口不支持都不该拖垮任务
                 existing = set()
 
@@ -261,11 +288,12 @@ class TaskRunner:
             done_set = {r["src"] for r in prev if r["status"] == "done"}
             done = len(done_set)
             failed = 0
+            skipped = 0
             seen = 0
             list_start = time.time()
             buf: list[tuple] = []
             self.store.run(
-                "UPDATE tasks SET total=0,done=?,failed=0,updated_at=? WHERE id=?",
+                "UPDATE tasks SET total=0,done=?,failed=0,skipped=0,updated_at=? WHERE id=?",
                 (done, now(), task_id),
             )
 
@@ -290,7 +318,8 @@ class TaskRunner:
                     )
                     if good:
                         done += 1
-                        existing.add(e.path.rsplit("/", 1)[-1])
+                        # 注意：不把刚转存的文件加进 existing——本任务内的同名文件是
+                        # 另一个分享里的另一个文件，按名字跳过会被整批误伤。
                     else:
                         failed += 1
                 buf.clear()
@@ -323,19 +352,20 @@ class TaskRunner:
                         if entry.path in done_set:
                             continue
                         name = entry.path.rsplit("/", 1)[-1]
-                        if name and name in existing:
-                            done += 1
+                        want = f"{task['target'].rstrip('/')}{entry.path}"
+                        if want in existing:
+                            skipped += 1
                             self.store.run(
                                 "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
                                 " VALUES(?,?,?,?,?,?,?)"
                                 " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
                                 " dst=excluded.dst,error=excluded.error",
                                 (task_id, entry.path, entry.size, entry.digest,
-                                 f"{task['target'].rstrip('/')}/{name}", "done", ""),
+                                 want, "skipped", "目标目录里已有同一个文件"),
                             )
                             self.store.run(
-                                "UPDATE tasks SET done=?,total=?,updated_at=? WHERE id=?",
-                                (done, seen, now(), task_id),
+                                "UPDATE tasks SET skipped=?,total=?,updated_at=? WHERE id=?",
+                                (skipped, seen, now(), task_id),
                             )
                             continue
                         # 一批只能属于同一条分享：pwd_id/stoken/fid_token 都是分享级的，
