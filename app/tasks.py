@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .db import Store, now
 from .providers import create
-from .providers.base import AuthExpired, ProviderError, ProviderNotReady
+from .providers.base import AuthExpired, Entry, ProviderError, ProviderNotReady, ShareRef
 
 TERMINAL = {"done", "failed", "canceled"}
 MAX_ATTEMPTS = 3
@@ -290,12 +290,69 @@ class TaskRunner:
             failed = 0
             skipped = 0
             seen = 0
-            list_start = time.time()
+
+            # ---------------- 阶段一：先把所有要转存的文件列出来 ----------------
+            # 分两段是刻意的：先把 n 条链接里的文件全部读出来（界面显示"已发现 N 个"），
+            # 再开始转存，然后每成功一个就 +1。边读边转时 total 一直在变，
+            # 用户看到的进度条会不断"往后跑"，永远不知道有多少活。
+            queue: list[tuple[ShareRef, Entry]] = []
+            for ref in refs:
+                if self._is_paused(task_id) or self._is_canceled(task_id):
+                    return
+                self._set_status(task_id, "listing")
+                share_start = time.time()
+                gen = prov.list_share(ref)
+                try:
+                    for entry in gen:
+                        if self._is_paused(task_id) or self._is_canceled(task_id):
+                            return
+                        # 单条分享给足 30 分钟：大分享能跑完，真无响应时单次请求
+                        # 本身有 20s 超时 + 重试，会先抛出来
+                        if time.time() - share_start > SHARE_MAX:
+                            raise ProviderError(
+                                f"单条分享处理超过 {SHARE_MAX // 60} 分钟仍未完成"
+                                f"（已发现 {seen} 个文件），点「重试」可从中断处继续"
+                            )
+                        if entry.path in done_set:
+                            continue
+                        want = f"{task['target'].rstrip('/')}{entry.path}"
+                        if want in existing:
+                            skipped += 1
+                            self.store.run(
+                                "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                " VALUES(?,?,?,?,?,?,?)"
+                                " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
+                                " dst=excluded.dst,error=excluded.error",
+                                (task_id, entry.path, entry.size, entry.digest,
+                                 want, "skipped", "目标目录里已有同一个文件"),
+                            )
+                        else:
+                            queue.append((ref, entry))
+                            # 先落成 pending：任务详情里能马上看到"要转哪些"，
+                            # 转存时逐条翻成 done/failed
+                            self.store.run(
+                                "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                " VALUES(?,?,?,?,?,?,?)"
+                                " ON CONFLICT(task_id,src) DO UPDATE SET status='pending',error=''",
+                                (task_id, entry.path, entry.size, entry.digest, "", "pending", ""),
+                            )
+                        seen += 1
+                        self.store.run(
+                            "UPDATE tasks SET total=?,skipped=?,updated_at=? WHERE id=?",
+                            (done + len(queue), skipped, now(), task_id),
+                        )
+                finally:
+                    closer = getattr(gen, "close", None)
+                    if closer:
+                        closer()
+            if not seen:
+                raise ProviderNotReady(
+                    "分享内没有可用文件（若分享里确有内容，请到「协议诊断」用同一链接查看原始响应）"
+                )
+
+            # ---------------- 阶段二：按批次转存，成功一个就记一个 ----------------
+            self._set_status(task_id, "transferring")
             buf: list[tuple] = []
-            self.store.run(
-                "UPDATE tasks SET total=0,done=?,failed=0,skipped=0,updated_at=? WHERE id=?",
-                (done, now(), task_id),
-            )
 
             def flush_batch() -> None:
                 nonlocal done, failed
@@ -303,7 +360,6 @@ class TaskRunner:
                     return
                 ref0 = buf[0][0]
                 batch = [e for _, e in buf]
-                self._set_status(task_id, "transferring")
                 ok, dsts, err = self._batch_with_retry(prov, ref0, batch, task["target"], cfg)
                 errs = getattr(prov, "last_batch_errors", []) or []
                 for idx, (_r, e) in enumerate(buf):
@@ -318,72 +374,26 @@ class TaskRunner:
                     )
                     if good:
                         done += 1
-                        # 注意：不把刚转存的文件加进 existing——本任务内的同名文件是
-                        # 另一个分享里的另一个文件，按名字跳过会被整批误伤。
                     else:
                         failed += 1
+                    # 每条都刷一次进度：界面是"成功一个显示一个"，不是整批跳
+                    self.store.run(
+                        "UPDATE tasks SET done=?,failed=?,updated_at=? WHERE id=?",
+                        (done, failed, now(), task_id),
+                    )
                 buf.clear()
-                self.store.run(
-                    "UPDATE tasks SET done=?,failed=?,updated_at=? WHERE id=?",
-                    (done, failed, now(), task_id),
-                )
 
-            for ref in refs:
+            for ref, entry in queue:
                 if self._is_paused(task_id) or self._is_canceled(task_id):
                     return
-                self._set_status(task_id, "listing")
-                share_start = time.time()
-                gen = prov.list_share(ref)
-                try:
-                    for entry in gen:
-                        seen += 1
-                        if self._is_paused(task_id) or self._is_canceled(task_id):
-                            return
-                        # 单条分享给足 30 分钟：大分享能跑完，真无响应时单次请求
-                        # 本身有 20s 超时 + 重试，会先抛出来
-                        if time.time() - share_start > SHARE_MAX:
-                            raise ProviderError(
-                                f"单条分享处理超过 {SHARE_MAX // 60} 分钟仍未完成"
-                                f"（已发现 {seen} 个文件），点「重试」可从中断处继续"
-                            )
-                        self.store.run(
-                            "UPDATE tasks SET total=?,updated_at=? WHERE id=?", (seen, now(), task_id)
-                        )
-                        if entry.path in done_set:
-                            continue
-                        name = entry.path.rsplit("/", 1)[-1]
-                        want = f"{task['target'].rstrip('/')}{entry.path}"
-                        if want in existing:
-                            skipped += 1
-                            self.store.run(
-                                "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
-                                " VALUES(?,?,?,?,?,?,?)"
-                                " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
-                                " dst=excluded.dst,error=excluded.error",
-                                (task_id, entry.path, entry.size, entry.digest,
-                                 want, "skipped", "目标目录里已有同一个文件"),
-                            )
-                            self.store.run(
-                                "UPDATE tasks SET skipped=?,total=?,updated_at=? WHERE id=?",
-                                (skipped, seen, now(), task_id),
-                            )
-                            continue
-                        # 一批只能属于同一条分享：pwd_id/stoken/fid_token 都是分享级的，
-                        # 混进别的分享的文件会整批 403（token 校验异常）。
-                        if buf and buf[-1][0].share_id != ref.share_id:
-                            flush_batch()
-                        buf.append((ref, entry))
-                        if len(buf) >= BATCH_SIZE:
-                            flush_batch()
-                finally:
-                    closer = getattr(gen, "close", None)
-                    if closer:
-                        closer()
+                # 一批只能属于同一条分享：pwd_id/stoken/fid_token 都是分享级的，
+                # 混进别的分享的文件会整批 403（token 校验异常）。
+                if buf and buf[-1][0].share_id != ref.share_id:
+                    flush_batch()
+                buf.append((ref, entry))
+                if len(buf) >= BATCH_SIZE:
+                    flush_batch()
             flush_batch()
-            if not seen:
-                raise ProviderNotReady(
-                    "分享内没有可用文件（若分享里确有内容，请到「协议诊断」用同一链接查看原始响应）"
-                )
 
             self._set_status(task_id, "verifying")
             self._set_status(task_id, "done")
