@@ -178,6 +178,21 @@ class AdapterTest(unittest.TestCase):
         landed = sorted(x["name"] for x in p.browse("/混合目录"))
         self.assertEqual(landed, ["a.txt", "c.txt"])
 
+    def test_quark_save_rejects_query_fid_as_pdir(self):
+        """回归：save 的 pdir_fid 传列目录用的相对 fid（根为 "0"）必须被拒。
+
+        真实 UC/夸克会回 403「转存文件token校验异常」，假网盘照此校验，
+        这样将来谁再把 meta["pdir"] 写回查询 fid，测试会立刻红。
+        """
+        p = self._p(QuarkProvider, cookie="__pus=abc")
+        ref = p.parse_links("https://pan.quark.cn/s/a1b2c3d4e5f6")[0]
+        entries = list(p.list_share(ref))
+        self.assertTrue(entries)
+        dest = p.ensure_dir("/坏Pdir")
+        with self.assertRaises(ProviderError) as ctx:
+            p._save_group(ref, p.share_token(ref), "0", [entries[0]], dest)
+        self.assertIn("token", str(ctx.exception))
+
     def test_quark_diagnose_reports_failure(self):
         p = self._p(QuarkProvider, cookie="__pus=abc")
         ref = p.parse_links("https://pan.quark.cn/s/zyxwvu987654")[0]

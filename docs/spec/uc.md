@@ -41,10 +41,19 @@ JSON：`{"pwd_id":"<分享id>","passcode":"<提取码或空>"}` → `{"status":0
 | `size` | `size` | 目录为 0 |
 | `fid` | `meta["fid"]`、`digest` | 转存必需 |
 | `share_fid_token` | `meta["token"]` | 转存必需 |
+| `pdir_fid` | `meta["pdir"]` | **该项真实的父目录 fid**，转存时用作 `pdir_fid` |
 | `dir` | — | true 递归 |
 | `metadata._total` | — | 总条数 |
 
 分页 50/页，深度上限 8，条目上限 5000。
+
+**关键约束（实测 2026-11-04，公开分享 `drive.uc.cn/s/e566b02a25f64`）**
+
+1. 查询参数 `pdir_fid` 用的是**分享内的相对 fid**：根目录传 `"0"`，子目录传目录自己的 `fid`。
+2. 但 save 时的 `pdir_fid` 必须用**条目自己的 `pdir_fid` 字段**（真实父目录 fid）。实测该分享根目录文件的 `pdir_fid = 729d7fa3...`，与查询用的 `"0"` 不同；传 `"0"` 会得到 `403 {"code":41020,"message":"转存文件token校验异常[<token> token校验异常]"}`。
+3. 拿条目自己的 `pdir_fid` 去查 `detail` 会回 `404 code=41038 文件没有被分享:[{...}]` —— 取 token 只能用相对 fid。
+4. `share_fid_token` **可重复提交**（同一 token 再 save 一次仍 200），不是一次性凭证；403 的实际含义是"pdir 不匹配或 token 过期"。
+5. save 返回 `data.task_id` 与 `data.task_sync`；轮询 `task` 到 `status==2` 后文件即出现在目标目录（已用 `file/sort` 复核）。
 
 ## §5 转存
 
@@ -74,8 +83,10 @@ JSON：`fid_list` / `fid_token_list` / `to_pdir_fid` / `pwd_id` / `stoken` / `pd
 
 ## §9 待实机校验
 
-- [ ] UC 的 `pr` 是否必须为 `UCBrowser`，`pc-api.uc.cn` 与 `drive.uc.cn` 前端用的域名是否一致。
-- [ ] `detail` 返回的 `share_fid_token` 在 UC 是否同样必需。
-- [ ] `save` 的 `to_pdir_fid` 是否接受与非根目录同层的新建 fid。
+- [x] UC 的 `pr` 用 `UCBrowser`、`fr=pc` 可用（`pc-api.uc.cn`），`drive.uc.cn` 直接请求会回 `403 invalid csrf token`。
+- [x] `detail` 返回的 `share_fid_token` 在 UC 同样必需（缺失或与 fid 不配对 → 403 / 41020）。
+- [x] `save` 的 `to_pdir_fid` 接受新建目录的 fid（`/PanTransfer_probe2` 实测落盘成功）。
+- [x] 大文件（`涉密检查.7z` 274 MB）转存只做服务端复制，秒级完成。
 - [ ] `task` 状态全集（是否出现夸克没有的中间态）。
 - [ ] UC 分享在未登录状态下是否仍可读 token（影响"只转存不登录"的边界）。
+- [ ] 同一批次跨多个父目录时，服务端是否允许一次 save 传多组 `pdir_fid`（当前实现按父目录分组、多请求提交）。

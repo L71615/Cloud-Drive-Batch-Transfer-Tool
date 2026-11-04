@@ -141,9 +141,11 @@ class CloudDrive(Provider):
                         meta={
                             "fid": it.get("fid"),
                             "token": it.get("share_fid_token"),
-                            # 转存时 pdir_fid 必须是这批文件在分享里的父目录，
-                            # 一律传 "0"（根）会被服务端判成"token 校验异常"
-                            "pdir": pdir,
+                            # 转存时 pdir_fid 要的是这一项**自己的父目录 fid**（pdir_fid 字段），
+                            # 不是列目录时用的相对 fid（根是 "0"）——传错了就回 403 token 校验异常
+                            "pdir": str(it.get("pdir_fid") or pdir),
+                            # 相对 fid 留着：重新取 token 时还得用它查 detail
+                            "pdir_query": pdir,
                         },
                     )
                     count += 1
@@ -195,12 +197,58 @@ class CloudDrive(Provider):
             raise ProviderError("转存失败")
         return res[0]
 
+    def _fresh_tokens(self, ref: ShareRef, stoken: str, query: str,
+                      wanted: set[str], size: int = 100) -> dict[str, str]:
+        """重新取一批 share_fid_token。
+
+        token 会过期：目录树是边遍历边转存的，大分享里前面目录的 token 等到
+        flush 时可能已经失效，服务端就回 403「转存文件token校验异常」。
+        注意 `query` 必须是**列目录时用的相对 fid**（根是 "0"），
+        用文件自己的 pdir_fid 去查会回 41038「文件没有被分享」。
+        """
+        out: dict[str, str] = {}
+        page = 1
+        while True:
+            d = self._page_share(ref, stoken, query, page, size)
+            items = d.get("list") or []
+            for it in items:
+                fid = str(it.get("fid") or "")
+                if fid in wanted and fid not in out:
+                    out[fid] = str(it.get("share_fid_token") or "")
+            total = int((d.get("metadata") or {}).get("_total") or 0)
+            if len(out) >= len(wanted) or not items or (total and page * size >= total):
+                break
+            page += 1
+        return out
+
+    @staticmethod
+    def _is_token_error(exc: Exception) -> bool:
+        s = str(exc)
+        return "token" in s or "41020" in s or "校验" in s
+
     def _save_group(self, ref: ShareRef, stoken: str, pdir: str,
-                    entries: list[Entry], dest: str) -> None:
-        """一次 save 提交同一个父目录下的多个文件。"""
+                    entries: list[Entry], dest: str,
+                    tokens: list[str] | None = None,
+                    query: str | None = None) -> None:
+        """一次 save 提交同一个父目录下的多个文件。
+
+        `pdir` 必须是文件在分享里的**真实父目录 fid**（取自条目的 pdir_fid），
+        传查询用的相对 fid（根的 "0"）会被判成 token 校验异常。
+        `tokens` 为空时按 `query`（列目录用的相对 fid）重新取一遍
+        —— 条目携带的 token 可能已经过期。
+        """
+        fids = [str(e.meta.get("fid") or "") for e in entries]
+        if tokens is None:
+            tokens = [str(e.meta.get("token") or "") for e in entries]
+            if query is not None:
+                try:
+                    fresh = self._fresh_tokens(ref, stoken, query, set(fids))
+                    tokens = [fresh.get(fid) or old for fid, old in zip(fids, tokens)]
+                except ProviderError:
+                    pass  # 取不到就用条目自带的，失败了还有下面的重试路径
         d = self._api(self.P_SAVE, "POST", body={
-            "fid_list": [e.meta.get("fid") for e in entries],
-            "fid_token_list": [e.meta.get("token") for e in entries],
+            "fid_list": fids,
+            "fid_token_list": tokens,
             "to_pdir_fid": dest,
             "pwd_id": ref.share_id,
             "stoken": stoken,
@@ -212,32 +260,32 @@ class CloudDrive(Provider):
             self._wait_task(str(task_id))
 
     def transfer_batch(self, ref: ShareRef, entries: list[Entry], target: str) -> list[str]:
-        """批量转存：按"分享内的父目录"分组，一组一次 save。
+        """批量转存：按「分享内的真实父目录」分组，一组一次 save。
 
-        服务端要求 pdir_fid 与 fid_list 同源（同一批文件必须是同一个父目录的子项），
-        否则会回 403「转存文件token校验异常」—— 之前全部传 "0" 就是这么挂的。
+        失败处理：遇到 token 类错误（过期/校验异常）时，刷新 stoken 并重新取
+        token 整组重试一次；仍然不行就逐个文件重取 token 单独提交，
+        免得一个坏文件把整批 20 个连坐。
         返回与 entries 等长的目标路径列表，失败的位置是空串。
         """
+        errs: list[str] = [""] * len(entries)
+        self.last_batch_errors = errs
         if not entries:
             return []
         dest = self.ensure_dir(target)
-        groups: dict[str, list[int]] = {}
+        groups: dict[tuple[str, str], list[int]] = {}
         for idx, e in enumerate(entries):
-            groups.setdefault(str(e.meta.get("pdir") or "0"), []).append(idx)
+            key = (str(e.meta.get("pdir") or "0"), str(e.meta.get("pdir_query") or "0"))
+            groups.setdefault(key, []).append(idx)
 
         out = [""] * len(entries)
-        errs = [""] * len(entries)
-        self.last_batch_errors = errs
         first_err = ""
-        for pdir, idxs in groups.items():
+        for (pdir, query), idxs in groups.items():
             group = [entries[i] for i in idxs]
             stoken = self.share_token(ref)
             try:
-                self._save_group(ref, stoken, pdir, group, dest)
+                self._save_group(ref, stoken, pdir, group, dest, query=query)
             except ProviderError as exc:
-                # token 有有效期：换一次 stoken 再试，仍然不行就逐个提交，
-                # 免得一个坏文件把整批 20 个都连坐。
-                if "token" not in str(exc) and "stoken" not in str(exc):
+                if not self._is_token_error(exc):
                     first_err = first_err or str(exc)
                     for i in idxs:
                         errs[i] = str(exc)
@@ -245,12 +293,23 @@ class CloudDrive(Provider):
                 self._stoken.pop(ref.share_id, None)
                 try:
                     stoken = self.share_token(ref)
-                    self._save_group(ref, stoken, pdir, group, dest)
+                    fresh = self._fresh_tokens(
+                        ref, stoken, query, {str(e.meta.get("fid")) for e in group})
+                    self._save_group(
+                        ref, stoken, pdir, group, dest,
+                        tokens=[fresh.get(str(e.meta.get("fid"))) or str(e.meta.get("token") or "")
+                                for e in group])
                 except ProviderError as exc2:
                     first_err = first_err or str(exc2)
                     for i, one in zip(idxs, group):
+                        fid = str(one.meta.get("fid"))
+                        q = str(one.meta.get("pdir_query") or query)
                         try:
-                            self._save_group(ref, stoken, pdir, [one], dest)
+                            stoken = self.share_token(ref)
+                            fresh = self._fresh_tokens(ref, stoken, q, {fid})
+                            self._save_group(
+                                ref, stoken, pdir, [one], dest,
+                                tokens=[fresh.get(fid) or str(one.meta.get("token") or "")])
                         except ProviderError as exc3:
                             errs[i] = str(exc3)
                             continue

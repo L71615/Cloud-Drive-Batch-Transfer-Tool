@@ -31,13 +31,20 @@ BAIDU_TREE = {
     ],
 }
 
+# 分享内的目录：key 是**列目录时用的相对 fid**（根为 "0"，子目录用目录自己的 fid），
+# 而每一项另带 `pdir_fid` —— 它在真实服务端上就等于"该项真正的父目录 fid"，
+# 两个值不是一回事：save 时 pdir_fid 必须传条目的 pdir_fid，传查询用的相对 fid
+# 会被判成 403 token 校验异常。这里把两种值刻意做成不同，才能回归这个 bug。
 CD_TREE = {
     "0": [
-        {"fid": "f1", "file_name": "a.txt", "size": 120, "dir": False, "share_fid_token": "t1"},
-        {"fid": "d1", "file_name": "相册", "size": 0, "dir": True, "share_fid_token": "t2"},
+        {"fid": "f1", "file_name": "a.txt", "size": 120, "dir": False,
+         "share_fid_token": "t1", "pdir_fid": "pr1"},
+        {"fid": "d1", "file_name": "相册", "size": 0, "dir": True,
+         "share_fid_token": "t2", "pdir_fid": "pr1"},
     ],
     "d1": [
-        {"fid": "f2", "file_name": "c.txt", "size": 64, "dir": False, "share_fid_token": "t3"},
+        {"fid": "f2", "file_name": "c.txt", "size": 64, "dir": False,
+         "share_fid_token": "t3", "pdir_fid": "d1"},
     ],
 }
 
@@ -66,10 +73,22 @@ class State:
         self.cd_fid_dir: dict[str, str] = {"0": "/"}
         self.cd: dict[str, dict] = {}
         self.seq = 0
+        # share_fid_token：真实服务端只校验"归属 + 有效期"，可重复提交；
+        # 这里签发后记住 owner，用来回归"pdir_fid 传错"和"token 串了"两类 bug
+        self.issued: dict[str, str] = {}
 
     def new_fid(self, prefix: str) -> str:
         self.seq += 1
         return f"{prefix}{self.seq}"
+
+    def issue_token(self, fid: str) -> str:
+        self.seq += 1
+        tok = f"{fid}-t{self.seq}"
+        self.issued[tok] = fid
+        if len(self.issued) > 5000:  # 别无限涨
+            for k in list(self.issued)[:2000]:
+                self.issued.pop(k, None)
+        return tok
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -179,19 +198,20 @@ class Handler(BaseHTTPRequestHandler):
             st = self.state
             dest_fid = str(body.get("to_pdir_fid") or "0")
             dpath = st.cd_fid_dir.get(dest_fid, "/")
-            # 真实服务端会校验 fid 与 pdir_fid 同源、token 与 fid 配对，
-            # 这里照做，否则"pdir_fid 恒为 0"这种 bug 在自检里看不出来
+            # 真实服务端会校验 fid 与 pdir_fid 同源、token 与 fid 配对：
+            # 这里照做，否则"pdir_fid 传查询相对 fid"这种 bug 在自检里看不出来。
+            # token 在真实服务端上可复用（只校验归属与有效期），所以不记 used。
             pdir = str(body.get("pdir_fid") or "0")
-            allowed = {str(x.get("fid")): str(x.get("share_fid_token") or "")
-                       for x in CD_TREE.get(pdir, [])}
             fids = [str(x) for x in (body.get("fid_list") or [])]
             tokens = [str(x) for x in (body.get("fid_token_list") or [])]
             for i, fid in enumerate(fids):
-                want = allowed.get(fid)
                 got = tokens[i] if i < len(tokens) else ""
-                if want is None or want != got:
+                src = next((x for items in CD_TREE.values() for x in items
+                            if str(x.get("fid")) == fid), None)
+                if src is None or str(src.get("pdir_fid") or "0") != pdir \
+                        or st.issued.get(got) != fid:
                     return self._json(
-                        {"status": 403, "code": 403,
+                        {"status": 403, "code": 41020,
                          "message": f"转存文件token校验异常[{got} token校验异常]"}, 403)
             dst = []
             for fid in (body.get("fid_list") or []):
@@ -266,8 +286,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if q.get("stoken") != "st-1":
                 return self._json({"status": 41006, "code": 41006, "message": "stoken 无效"})
-            fid = q.get("pdir_fid") or "0"
-            items = CD_TREE.get(fid, [])
+            fid = str(q.get("pdir_fid") or "0")
+            if fid not in CD_TREE:
+                # 真实服务端：拿条目自己的 pdir_fid 来查 detail 会回 41038，
+                # 查 detail 只能用列表里的相对 fid（根是 "0"）
+                return self._json({"status": 404, "code": 41038,
+                                   "message": f"文件没有被分享:[{{{fid}}}]"})
+            items = []
+            for x in CD_TREE.get(fid, []):
+                one = dict(x)
+                # 每次 detail 都发新 token；旧 token 仍可复用（真实行为），
+                # 但"归属必须对得上"这一点保持强校验
+                one["share_fid_token"] = self.state.issue_token(str(x.get("fid")))
+                items.append(one)
             return self._json({"status": 0, "code": 0,
                                "data": {"list": items, "metadata": {"_total": len(items)}}})
 
