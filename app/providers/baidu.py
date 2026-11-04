@@ -207,10 +207,13 @@ class BaiduProvider(Provider):
 
     # ---------------- 转存 ----------------
     def transfer(self, ref: ShareRef, entry: Entry, target: str) -> str:
+        return self.transfer_batch(ref, [entry], target)[0]
+
+    def transfer_batch(self, ref: ShareRef, entries: list, target: str) -> list[str]:
         meta = self.share_meta(ref)
         dest = self.ensure_dir(target)
-        fs_id = entry.meta.get("fs_id")
-        if fs_id in (None, ""):
+        ids = [e.meta.get("fs_id") for e in entries if e.meta.get("fs_id") not in (None, "")]
+        if not ids:
             raise ProviderError("缺少 fs_id，无法转存")
         data = self._c().request(
             "POST", self.BASE + "/share/transfer",
@@ -218,15 +221,18 @@ class BaiduProvider(Provider):
                 "shareid": meta["shareid"], "from": meta["uk"], "sekey": meta["sekey"],
                 "ondup": "newcopy", "async": "1", **self._common(),
             },
-            body={"fsidlist": json.dumps([fs_id]), "path": dest},
+            body={"fsidlist": json.dumps(ids), "path": dest},
             form=True,
         )
         d = self._check(data, "转存")
-        for item in (d.get("extra") or {}).get("list") or []:
-            if "to" in item:
-                return str(item["to"])
-        name = entry.path.rsplit("/", 1)[-1]
-        return f"{dest.rstrip('/')}/{name}"
+        got = [str(item.get("to")) for item in (d.get("extra") or {}).get("list") or [] if item.get("to")]
+        base = dest.rstrip("/")
+        out = []
+        for e in entries:
+            name = e.path.rsplit("/", 1)[-1]
+            match = next((g for g in got if g.endswith("/" + name)), "")
+            out.append(match or f"{base}/{name}")
+        return out
 
     # ---------------- 其它 ----------------
     def list_dir(self, path: str = "/") -> list[Entry]:

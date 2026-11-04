@@ -203,6 +203,27 @@ class CloudDrive(Provider):
         name = entry.path.rsplit("/", 1)[-1]
         return f"{target.rstrip('/')}/{name}"
 
+    def transfer_batch(self, ref: ShareRef, entries: list[Entry], target: str) -> list[str]:
+        """一次 save 提交多个文件（官方接口支持 fid_list 数组），比逐个转存快一个数量级。"""
+        if not entries:
+            return []
+        stoken = self.share_token(ref)
+        dest = self.ensure_dir(target)
+        d = self._api(self.P_SAVE, "POST", body={
+            "fid_list": [e.meta.get("fid") for e in entries],
+            "fid_token_list": [e.meta.get("token") for e in entries],
+            "to_pdir_fid": dest,
+            "pwd_id": ref.share_id,
+            "stoken": stoken,
+            "pdir_fid": "0",
+            "scene": "link",
+        })
+        task_id = d.get("task_id")
+        if task_id:
+            self._wait_task(str(task_id))
+        base = target.rstrip("/")
+        return [f"{base}/{e.path.rsplit('/', 1)[-1]}" for e in entries]
+
     def _wait_task(self, task_id: str, timeout: float = 120.0) -> None:
         end = time.time() + timeout
         time.sleep(0.2)

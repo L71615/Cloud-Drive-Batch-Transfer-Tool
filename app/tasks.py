@@ -23,6 +23,7 @@ from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 TERMINAL = {"done", "failed", "canceled"}
 MAX_ATTEMPTS = 3
 LISTING_MAX = 600  # 秒；列目录整体上限，超过就报错而不是无限等待
+BATCH_SIZE = 20    # 每批转存的文件数（一次 save 提交多个 fid）
 
 DEFAULT_SETTINGS = {
     "concurrency": 2,
@@ -238,18 +239,45 @@ class TaskRunner:
             if not refs:
                 raise ProviderNotReady("没有解析到分享链接，请检查粘贴内容")
 
-            # 边读目录边转存：大分享不必等整棵树读完才开始，进度条一直在走
+            # 边读目录边转存：大分享不必等整棵树读完才开始，进度条一直在走。
+            # 攒够一批再一次 save（官方接口支持 fid_list 数组），十来个文件一次请求，比逐个快很多。
             prev = self.store.all("SELECT src,status FROM items WHERE task_id=?", (task_id,))
             done_set = {r["src"] for r in prev if r["status"] == "done"}
             done = len(done_set)
             failed = 0
             seen = 0
-            started = False
             list_start = time.time()
+            buf: list[tuple] = []
             self.store.run(
                 "UPDATE tasks SET total=0,done=?,failed=0,updated_at=? WHERE id=?",
                 (done, now(), task_id),
             )
+
+            def flush_batch() -> None:
+                nonlocal done, failed
+                if not buf:
+                    return
+                ref0 = buf[0][0]
+                batch = [e for _, e in buf]
+                self._set_status(task_id, "transferring")
+                ok, dsts, err = self._batch_with_retry(prov, ref0, batch, task["target"], cfg)
+                for idx, (_r, e) in enumerate(buf):
+                    dst = dsts[idx] if ok and idx < len(dsts) else ""
+                    self.store.run(
+                        "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
+                        " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
+                        (task_id, e.path, e.size, e.digest, dst, "done" if ok else "failed", "" if ok else err),
+                    )
+                    if ok:
+                        done += 1
+                    else:
+                        failed += 1
+                buf.clear()
+                self.store.run(
+                    "UPDATE tasks SET done=?,failed=?,updated_at=? WHERE id=?",
+                    (done, failed, now(), task_id),
+                )
+
             for ref in refs:
                 if self._is_paused(task_id) or self._is_canceled(task_id):
                     return
@@ -265,32 +293,19 @@ class TaskRunner:
                                 f"读取目录超过 {LISTING_MAX // 60} 分钟仍未完成"
                                 f"（已发现 {seen} 个文件），请改用「协议诊断」逐步定位"
                             )
+                        self.store.run(
+                            "UPDATE tasks SET total=?,updated_at=? WHERE id=?", (seen, now(), task_id)
+                        )
                         if entry.path in done_set:
-                            self.store.run(
-                                "UPDATE tasks SET total=?,updated_at=? WHERE id=?", (seen, now(), task_id)
-                            )
                             continue
-                        if not started:
-                            started = True
-                            self._set_status(task_id, "transferring")
-                        ok, dst, err = self._transfer_with_retry(prov, ref, entry, task["target"], cfg)
-                        self.store.run(
-                            "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
-                            " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
-                            (task_id, entry.path, entry.size, entry.digest, dst, "done" if ok else "failed", err or ""),
-                        )
-                        if ok:
-                            done += 1
-                        else:
-                            failed += 1
-                        self.store.run(
-                            "UPDATE tasks SET total=?,done=?,failed=?,updated_at=? WHERE id=?",
-                            (seen, done, failed, now(), task_id),
-                        )
+                        buf.append((ref, entry))
+                        if len(buf) >= BATCH_SIZE:
+                            flush_batch()
                 finally:
                     closer = getattr(gen, "close", None)
                     if closer:
                         closer()
+            flush_batch()
             if not seen:
                 raise ProviderNotReady(
                     "分享内没有可用文件（若分享里确有内容，请到「协议诊断」用同一链接查看原始响应）"
@@ -305,6 +320,33 @@ class TaskRunner:
         except Exception as e:  # noqa: BLE001 - 兜底，任务不能卡死
             self._set_status(task_id, "failed", f"{type(e).__name__}: {e}")
             traceback.print_exc()
+
+    def _batch_with_retry(self, prov, ref, entries: list, target: str,
+                          cfg: dict | None = None) -> tuple[bool, list, str]:
+        """整批转存；provider 不支持批量时退化为逐个。"""
+        last = ""
+        attempts = max(1, int((cfg or {}).get("retries") or MAX_ATTEMPTS))
+        batch_fn = getattr(prov, "transfer_batch", None)
+        for attempt in range(attempts):
+            try:
+                if batch_fn:
+                    return True, list(batch_fn(ref, entries, target)), ""
+                out = []
+                for e in entries:
+                    ok, dst, err = self._transfer_with_retry(prov, ref, e, target, cfg)
+                    if not ok:
+                        return False, out, err
+                    out.append(dst)
+                return True, out, ""
+            except AuthExpired as e:
+                return False, [], f"登录态失效：{e}"
+            except ProviderError as e:
+                last = str(e)
+                time.sleep(min(2 ** attempt, 5) * 0.3)
+            except Exception as e:  # noqa: BLE001
+                last = f"{type(e).__name__}: {e}"
+                break
+        return False, [], last
 
     def _transfer_with_retry(self, prov, ref, entry, target: str, cfg: dict | None = None) -> tuple[bool, str, str]:
         last = ""

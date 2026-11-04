@@ -63,6 +63,24 @@ class AdapterTest(unittest.TestCase):
         quota = p.quota()
         self.assertGreater(quota["total"], 0)
 
+    def test_baidu_batch_transfer(self):
+        """一次 save 提交多个 fs_id：批量转存应返回每条的落盘路径，且都真实可见。"""
+        p = self._p(BaiduProvider)
+        ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: x9y8")[0]
+        entries = list(p.list_share(ref))
+        dsts = p.transfer_batch(ref, entries, "/批量")
+        self.assertEqual(len(dsts), len(entries))
+        self.assertEqual(sorted(x.rsplit("/", 1)[-1] for x in dsts), ["a.txt", "b.bin", "c.txt"])
+        names = sorted(x["name"] for x in p.browse("/批量"))
+        self.assertEqual(names, ["a.txt", "b.bin", "c.txt"], "批量转存的文件应真的落到目标目录")
+
+    def test_quark_batch_transfer(self):
+        p = self._p(QuarkProvider, cookie="__pus=abc")
+        ref = p.parse_links("https://pan.quark.cn/s/a1b2c3d4e5f6")[0]
+        entries = list(p.list_share(ref))
+        dsts = p.transfer_batch(ref, entries, "/批量")
+        self.assertEqual(sorted(x.rsplit("/", 1)[-1] for x in dsts), ["a.txt", "c.txt"])
+
     def test_baidu_wrong_passcode(self):
         p = self._p(BaiduProvider)
         ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf 提取码: 0000")[0]
