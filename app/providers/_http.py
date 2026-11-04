@@ -26,6 +26,17 @@ _TRACE = threading.local()
 # 这些业务码才是"登录态没了"，其它 4xx 都是协议/参数问题
 AUTH_CODES = frozenset({31001, 31023, 40101, -6})
 
+# 限速类反馈：见到就自动降速，别让用户自己去猜 QPS 该填几
+RATE_CODES = frozenset({429, 41018, 41019, 31012, 9000})
+RATE_WORDS = ("频繁", "过快", "限速", "too many", "rate limit", "retry later")
+
+
+def _is_rate_limited(http_code: int, msg: str) -> bool:
+    if http_code == 429:
+        return True
+    low = (msg or "").lower()
+    return any(w in low for w in RATE_WORDS)
+
 
 def trace_on() -> list:
     """开始记录本线程发出的请求，返回可追加的列表。"""
@@ -105,6 +116,7 @@ class Client:
                 except json.JSONDecodeError:
                     obj = text
                 _record(method, url, obj)
+                bucket(self._bucket_name, self.qps).reward()
                 return obj
             except urllib.error.HTTPError as e:
                 text = ""
@@ -130,6 +142,8 @@ class Client:
                 if auth_like:
                     extra = f" {msg}" if msg else ""
                     raise AuthExpired(f"{self.provider}: http {e.code}{extra}") from e
+                if _is_rate_limited(e.code, msg):
+                    bucket(self._bucket_name, self.qps).penalize()
                 if 400 <= e.code < 500 and e.code != 429:
                     detail = msg or text[:120] or "no body"
                     suffix = f"（code={code}）" if code is not None else ""
@@ -137,5 +151,13 @@ class Client:
                 last = e
             except (urllib.error.URLError, TimeoutError) as e:
                 last = e
+            if isinstance(last, urllib.error.HTTPError) and last.code == 429:
+                # 服务端明确限速：自动降速，并按 Retry-After 罚站，不用用户去试 QPS
+                ra = None
+                try:
+                    ra = float(last.headers.get("Retry-After") or 0) or None
+                except (TypeError, ValueError):
+                    ra = None
+                bucket(self._bucket_name, self.qps).penalize(ra)
             time.sleep(min(2 ** attempt, 8) * 0.5)
         raise ProviderError(f"{self.provider}: request failed after {tries} tries: {last}")

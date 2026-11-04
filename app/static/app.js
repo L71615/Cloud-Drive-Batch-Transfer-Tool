@@ -619,10 +619,24 @@
     const { settings } = await api('/api/settings');
     S.settings = settings;
     $('#setConcurrency').value = settings.concurrency ?? 2;
-    $('#setQps').value = settings.qps ?? 0.8;
+    $('#setQps').value = settings.qps ?? 2.5;
     $('#setRetries').value = settings.retries ?? 3;
     $('#setTarget').value = settings.default_target ?? '/PanTransfer';
     $('#target').value = settings.default_target ?? '/PanTransfer';
+    refreshRates();
+  }
+
+  // 自动调速：把每个网盘当前的真实速率显示出来，让用户知道不用自己算
+  async function refreshRates() {
+    try {
+      const s = await api('/api/stats');
+      const rates = s.rates || {};
+      const parts = Object.entries(rates).map(([name, r]) =>
+        `<span class="pill ${r.penalties ? 'wait' : 'ok'}">${esc(name)} ${r.rate}/s</span>`);
+      $('#rateInfo').innerHTML = parts.length
+        ? `当前实际速率：${parts.join(' ')} <em>（上限 ${S.settings?.qps ?? '-'} /s，被限速会自动降，恢复后自动升）</em>`
+        : '<em>还没有请求，速率以上限的一半起步，平稳后会自动升上去</em>';
+    } catch (_) { /* 统计接口失败不影响保存 */ }
   }
 
   async function saveSettings() {
@@ -633,8 +647,9 @@
         retries: Number($('#setRetries').value),
         default_target: $('#setTarget').value.trim() || '/PanTransfer',
       });
-      note('#setHint', '已保存（并发与限速在下一个任务生效）');
+      note('#setHint', '已保存');
       toast('设置已保存', 'ok');
+      refreshRates();
     } catch (e) { note('#setHint', e.message, true); }
   }
 

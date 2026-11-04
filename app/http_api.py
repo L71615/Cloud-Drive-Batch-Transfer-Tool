@@ -143,7 +143,8 @@ class Handler(BaseHTTPRequestHandler):
                 "providers": self._provider_caps(),
             })
         if path == "/api/stats":
-            return self._send(200, {"ok": True, **self.app.runner.stats()})
+            from .ratelimit import snapshot as _rates
+            return self._send(200, {"ok": True, **self.app.runner.stats(), "rates": _rates()})
         if path == "/api/settings":
             return self._send(200, {"ok": True, "settings": self.app.runner.settings()})
         if path == "/api/browse":
