@@ -109,9 +109,9 @@ class TaskRunner:
         task_id = uuid.uuid4().hex[:12]
         ts = now()
         self.store.run(
-            "INSERT INTO tasks(id,provider,target,status,total,done,failed,error,created_at,updated_at)"
-            " VALUES(?,?,?,?,0,0,0,'',?,?)",
-            (task_id, provider, target, "pending", ts, ts),
+            "INSERT INTO tasks(id,provider,target,status,total,done,failed,error,links,credential,created_at,updated_at)"
+            " VALUES(?,?,?,?,0,0,0,'',?,?,?,?)",
+            (task_id, provider, target, "pending", links, credential, ts, ts),
         )
         with self._lock:
             setattr(self, f"_links_{task_id}", links)
@@ -137,9 +137,14 @@ class TaskRunner:
         self._set_status(task_id, "canceled")
 
     def view(self, task_id: str) -> dict | None:
-        t = self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+        t = self.store.one(
+            "SELECT id,provider,target,status,total,done,failed,error,links,"
+            "created_at,updated_at FROM tasks WHERE id=?", (task_id,),
+        )
         if not t:
             return None
+        # 登录态绝不外泄给前端；只告诉界面"这个任务有没有存链接"，决定重试时要不要让用户补
+        t["has_links"] = bool(t.pop("links", ""))
         t["items"] = self.store.all(
             "SELECT src,size,digest,dst,status,error FROM items WHERE task_id=? ORDER BY id", (task_id,)
         )
@@ -225,8 +230,8 @@ class TaskRunner:
         task = self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
         if not task or task["status"] in TERMINAL:
             return
-        links = getattr(self, f"_links_{task_id}", "")
-        cred = getattr(self, f"_cred_{task_id}", "")
+        links = getattr(self, f"_links_{task_id}", "") or task.get("links") or ""
+        cred = getattr(self, f"_cred_{task_id}", "") or task.get("credential") or ""
         cfg = self.settings()
         try:
             if self._is_canceled(task_id):

@@ -391,8 +391,16 @@
       };
       const retry = tr.querySelector('[data-a="retry"]');
       if (retry) retry.onclick = async () => {
-        await post(`/api/tasks/${t.id}/retry`);
-        toast('已重新排队', 'ok'); loadTasks();
+        // 旧版本任务没存链接，重试时必须让用户把链接补回来
+        let links = '';
+        if (t.has_links === false) {
+          links = prompt('这个任务是旧版本创建的，没有保存原始链接。\n把同一条分享链接再粘一次（已转存的文件会自动跳过）：') || '';
+          if (!links.trim()) return;
+        }
+        try {
+          await post(`/api/tasks/${t.id}/retry`, links ? { links } : undefined);
+          toast('已重新排队', 'ok'); loadTasks();
+        } catch (e) { toast(e.message, true); }
       };
       tr.querySelector('[data-a="del"]').onclick = async () => {
         if (!confirm('删除任务记录 ' + t.id + '？（不影响已转存的文件）')) return;

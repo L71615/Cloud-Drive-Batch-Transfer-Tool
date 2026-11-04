@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS tasks(
     done        INTEGER NOT NULL DEFAULT 0,
     failed      INTEGER NOT NULL DEFAULT 0,
     error       TEXT    NOT NULL DEFAULT '',
+    links       TEXT    NOT NULL DEFAULT '',
+    credential  TEXT    NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
@@ -63,6 +65,17 @@ class Store:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._local = threading.local()
         self.conn().executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """老库补列：链接与登录态要落盘，否则进程重启后「重试」无从下手。"""
+        cols = {r["name"] for r in self.all("PRAGMA table_info(tasks)")}
+        for col, ddl in (
+            ("links", "ALTER TABLE tasks ADD COLUMN links TEXT NOT NULL DEFAULT ''"),
+            ("credential", "ALTER TABLE tasks ADD COLUMN credential TEXT NOT NULL DEFAULT ''"),
+        ):
+            if col not in cols:
+                self.run(ddl)
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "c", None)

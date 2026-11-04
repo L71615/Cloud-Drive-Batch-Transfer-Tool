@@ -183,7 +183,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tasks":
             limit = min(int(parse_qs(u.query).get("limit", ["100"])[0]), 500)
             rows = self.app.store.all(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT id,provider,target,status,total,done,failed,error,"
+                " links<>'' AS has_links, created_at,updated_at"
+                " FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
             )
             return self._send(200, {"ok": True, "tasks": rows})
         m = TASK_ONE.match(path)
@@ -360,6 +362,15 @@ class Handler(BaseHTTPRequestHandler):
             task_id, action = m.group(1), m.group(2)
             if not self.app.store.one("SELECT id FROM tasks WHERE id=?", (task_id,)):
                 return self._err(404, "task not found")
+            if action == "retry":
+                # 旧版本建的任务没有把链接落盘：允许重试时把链接补回来
+                links = str(body.get("links") or "").strip()
+                if links:
+                    self.app.store.run(
+                        "UPDATE tasks SET links=? WHERE id=?", (links, task_id)
+                    )
+                elif not (self.app.store.one("SELECT links FROM tasks WHERE id=?", (task_id,)) or {}).get("links"):
+                    return self._err(400, "这个任务没有保存原始链接，重试时请把链接一起发过来")
             getattr(self.app.runner, action)(task_id)
             return self._send(200, {"ok": True})
 
