@@ -185,6 +185,19 @@ class TaskRunner:
             self._paused.discard(task_id)
             self._canceled.discard(task_id)
 
+    def recover_orphans(self) -> int:
+        """进程重启后，把上次没跑完的任务标成失败并可重试（已完成条目会被跳过）。"""
+        rows = self.store.all(
+            "SELECT id FROM tasks WHERE status IN"
+            " ('pending','resolving','listing','transferring','verifying')"
+        )
+        for r in rows:
+            self.store.run(
+                "UPDATE tasks SET status='failed',error=?,updated_at=? WHERE id=?",
+                ("程序重启导致任务中断，点「重试」可继续（已完成的文件不会重复转存）", now(), r["id"]),
+            )
+        return len(rows)
+
     def stats(self) -> dict:
         row = self.store.one(
             "SELECT"

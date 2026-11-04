@@ -47,6 +47,7 @@ class App:
     def __init__(self, db_path: str, workers: int = 2):
         self.store = Store(db_path)
         self.runner = TaskRunner(self.store, workers=workers)
+        self.runner.recover_orphans()
 
     def close(self) -> None:
         self.runner.shutdown()
