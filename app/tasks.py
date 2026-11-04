@@ -22,7 +22,7 @@ from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 
 TERMINAL = {"done", "failed", "canceled"}
 MAX_ATTEMPTS = 3
-LISTING_MAX = 600  # 秒；列目录整体上限，超过就报错而不是无限等待
+SHARE_MAX = 1800   # 秒；单条分享的处理上限（读目录 + 转存），到时才算真的卡住
 BATCH_SIZE = 20    # 每批转存的文件数（一次 save 提交多个 fid）
 
 DEFAULT_SETTINGS = {
@@ -266,14 +266,16 @@ class TaskRunner:
                 batch = [e for _, e in buf]
                 self._set_status(task_id, "transferring")
                 ok, dsts, err = self._batch_with_retry(prov, ref0, batch, task["target"], cfg)
+                errs = getattr(prov, "last_batch_errors", []) or []
                 for idx, (_r, e) in enumerate(buf):
                     dst = dsts[idx] if ok and idx < len(dsts) else ""
                     good = bool(dst)
+                    why = errs[idx] if idx < len(errs) and errs[idx] else (err or "转存失败")
                     self.store.run(
                         "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
                         " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
                         (task_id, e.path, e.size, e.digest, dst, "done" if good else "failed",
-                         "" if good else (err or "转存失败")),
+                         "" if good else why),
                     )
                     if good:
                         done += 1
@@ -289,16 +291,19 @@ class TaskRunner:
                 if self._is_paused(task_id) or self._is_canceled(task_id):
                     return
                 self._set_status(task_id, "listing")
+                share_start = time.time()
                 gen = prov.list_share(ref)
                 try:
                     for entry in gen:
                         seen += 1
                         if self._is_paused(task_id) or self._is_canceled(task_id):
                             return
-                        if time.time() - list_start > LISTING_MAX:
+                        # 单条分享给足 30 分钟：大分享能跑完，真无响应时单次请求
+                        # 本身有 20s 超时 + 重试，会先抛出来
+                        if time.time() - share_start > SHARE_MAX:
                             raise ProviderError(
-                                f"读取目录超过 {LISTING_MAX // 60} 分钟仍未完成"
-                                f"（已发现 {seen} 个文件），请改用「协议诊断」逐步定位"
+                                f"单条分享处理超过 {SHARE_MAX // 60} 分钟仍未完成"
+                                f"（已发现 {seen} 个文件），点「重试」可从中断处继续"
                             )
                         self.store.run(
                             "UPDATE tasks SET total=?,updated_at=? WHERE id=?", (seen, now(), task_id)

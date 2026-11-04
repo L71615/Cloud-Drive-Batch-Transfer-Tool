@@ -226,6 +226,8 @@ class CloudDrive(Provider):
             groups.setdefault(str(e.meta.get("pdir") or "0"), []).append(idx)
 
         out = [""] * len(entries)
+        errs = [""] * len(entries)
+        self.last_batch_errors = errs
         first_err = ""
         for pdir, idxs in groups.items():
             group = [entries[i] for i in idxs]
@@ -237,6 +239,8 @@ class CloudDrive(Provider):
                 # 免得一个坏文件把整批 20 个都连坐。
                 if "token" not in str(exc) and "stoken" not in str(exc):
                     first_err = first_err or str(exc)
+                    for i in idxs:
+                        errs[i] = str(exc)
                     continue
                 self._stoken.pop(ref.share_id, None)
                 try:
@@ -247,7 +251,8 @@ class CloudDrive(Provider):
                     for i, one in zip(idxs, group):
                         try:
                             self._save_group(ref, stoken, pdir, [one], dest)
-                        except ProviderError:
+                        except ProviderError as exc3:
+                            errs[i] = str(exc3)
                             continue
                         out[i] = f"{target.rstrip('/')}/{one.path.rsplit('/', 1)[-1]}"
                     continue
