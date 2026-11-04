@@ -341,6 +341,14 @@
   };
   const isRunning = (s) => ['pending', 'resolving', 'listing', 'transferring', 'verifying'].includes(s);
 
+  // total = 分享内已发现的文件数（一条链接可能含成百上千个文件），不是链接数
+  function progressText(t) {
+    const fail = t.failed ? ` · 失败 ${t.failed}` : '';
+    if (t.status === 'listing' && !t.done) return `正在读取目录 · 已发现 ${t.total} 个文件`;
+    if (t.status === 'transferring') return `已转存 ${t.done}/${t.total}${fail}`;
+    return `${t.done}/${t.total}${fail}`;
+  }
+
   async function loadTasks() {
     const { tasks } = await api('/api/tasks?limit=200');
     S.tasks = tasks;
@@ -360,9 +368,7 @@
         <td><span class="pill" style="border-color:${esc(p.color)}55;color:${esc(p.color)}">${esc(p.label)}</span></td>
         <td>${pill(t.status)}${t.error ? `<div class="muted" style="color:#f0a29c;margin-top:3px">${esc(t.error)}</div>` : ''}</td>
         <td>
-          <div class="muted">${t.status === 'listing' && !t.done
-            ? `已发现 ${t.total} 个文件…`
-            : `${t.done}/${t.total}${t.failed ? ` · 失败 ${t.failed}` : ''}`}</div>
+          <div class="muted">${progressText(t)}</div>
           <div class="bar"><i style="width:${pct}%"></i></div>
         </td>
         <td class="mono muted">${esc(t.target)}</td>

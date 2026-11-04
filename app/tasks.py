@@ -238,63 +238,62 @@ class TaskRunner:
             if not refs:
                 raise ProviderNotReady("没有解析到分享链接，请检查粘贴内容")
 
-            # listing：边读边报进度，界面不会一直停在 0/0
-            entries: list[tuple] = []
+            # 边读目录边转存：大分享不必等整棵树读完才开始，进度条一直在走
+            prev = self.store.all("SELECT src,status FROM items WHERE task_id=?", (task_id,))
+            done_set = {r["src"] for r in prev if r["status"] == "done"}
+            done = len(done_set)
+            failed = 0
             seen = 0
+            started = False
             list_start = time.time()
+            self.store.run(
+                "UPDATE tasks SET total=0,done=?,failed=0,updated_at=? WHERE id=?",
+                (done, now(), task_id),
+            )
             for ref in refs:
                 if self._is_paused(task_id) or self._is_canceled(task_id):
                     return
                 self._set_status(task_id, "listing")
                 gen = prov.list_share(ref)
                 try:
-                    for e in gen:
-                        entries.append((ref, e))
+                    for entry in gen:
                         seen += 1
-                        if seen == 1 or seen % 10 == 0:
-                            self.store.run(
-                                "UPDATE tasks SET total=?,updated_at=? WHERE id=?",
-                                (seen, now(), task_id),
-                            )
+                        if self._is_paused(task_id) or self._is_canceled(task_id):
+                            return
                         if time.time() - list_start > LISTING_MAX:
                             raise ProviderError(
                                 f"读取目录超过 {LISTING_MAX // 60} 分钟仍未完成"
                                 f"（已发现 {seen} 个文件），请改用「协议诊断」逐步定位"
                             )
+                        if entry.path in done_set:
+                            self.store.run(
+                                "UPDATE tasks SET total=?,updated_at=? WHERE id=?", (seen, now(), task_id)
+                            )
+                            continue
+                        if not started:
+                            started = True
+                            self._set_status(task_id, "transferring")
+                        ok, dst, err = self._transfer_with_retry(prov, ref, entry, task["target"], cfg)
+                        self.store.run(
+                            "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
+                            " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
+                            (task_id, entry.path, entry.size, entry.digest, dst, "done" if ok else "failed", err or ""),
+                        )
+                        if ok:
+                            done += 1
+                        else:
+                            failed += 1
+                        self.store.run(
+                            "UPDATE tasks SET total=?,done=?,failed=?,updated_at=? WHERE id=?",
+                            (seen, done, failed, now(), task_id),
+                        )
                 finally:
                     closer = getattr(gen, "close", None)
                     if closer:
                         closer()
-            if not entries:
+            if not seen:
                 raise ProviderNotReady(
                     "分享内没有可用文件（若分享里确有内容，请到「协议诊断」用同一链接查看原始响应）"
-                )
-
-            self.store.run("UPDATE tasks SET total=?,updated_at=? WHERE id=?", (len(entries), now(), task_id))
-            self._set_status(task_id, "transferring")
-
-            # 续跑：已完成条目直接跳过，失败条目重试（pause/resume 与进程重启都走这条路径）
-            prev = self.store.all("SELECT src,status FROM items WHERE task_id=?", (task_id,))
-            done_set = {r["src"] for r in prev if r["status"] == "done"}
-            done = len(done_set)
-            failed = 0
-            for ref, entry in entries:
-                if entry.path in done_set:
-                    continue
-                if self._is_paused(task_id) or self._is_canceled(task_id):
-                    return
-                ok, dst, err = self._transfer_with_retry(prov, ref, entry, task["target"], cfg)
-                self.store.run(
-                    "INSERT INTO items(task_id,src,size,digest,dst,status,error) VALUES(?,?,?,?,?,?,?)"
-                    " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,dst=excluded.dst,error=excluded.error",
-                    (task_id, entry.path, entry.size, entry.digest, dst, "done" if ok else "failed", err or ""),
-                )
-                if ok:
-                    done += 1
-                else:
-                    failed += 1
-                self.store.run(
-                    "UPDATE tasks SET done=?,failed=?,updated_at=? WHERE id=?", (done, failed, now(), task_id)
                 )
 
             self._set_status(task_id, "verifying")
