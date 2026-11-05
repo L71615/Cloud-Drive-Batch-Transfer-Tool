@@ -98,9 +98,9 @@ python -m unittest discover -s tests
 #    app/__init__.py      __version__ = "0.2.1"
 #    pyproject.toml       version = "0.2.1"
 
-# 3. 在 CHANGELOG.md 顶部加一节（见下）
+# 3. 写 RELEASE-NOTES-v0.2.1.md，在 CHANGELOG.md 顶部加一节，并更新两者的「当前版本」行
 
-# 4. 提交（只含版本号与 CHANGELOG）
+# 4. 提交（只含版本号、CHANGELOG、发版说明）
 git add -A
 git commit -m "chore(release): v0.2.1"
 git tag v0.2.1
@@ -110,21 +110,70 @@ git push origin main
 git push origin v0.2.1
 ```
 
-### CHANGELOG 写法
+### README 版头格式（每个版本都要更新）
 
-`CHANGELOG.md` 最新版本放最上面，只写用户能感知的变化：
+README 最顶部保持这个结构，三行状态块 + 五个徽章 + 一行链接：
 
 ```markdown
-## v0.2.1 — 2026-11-05
+# 项目名
 
-### 修复
-- UC 转存子目录文件时偶发 403（`pdir_fid` 未按父目录分组）
+### 一句话定位 · A / B / C
 
-### 其它
-- 无
+> ✅ **当前版本**：`v0.2.0` (2026-11-05) — 这一版主要做了什么
+> **上一版本**：`v0.1.0` (2026-11-04) — 上一版做了什么
+> 详见 [RELEASE-NOTES-v0.2.0.md](RELEASE-NOTES-v0.2.0.md) + [CHANGELOG.md](CHANGELOG.md)
+
+**一句话能力罗列 · 动作 → 动作 → 结果**
+
+![version](https://img.shields.io/badge/version-0.2.0-2b7cff)
+![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
+![license](https://img.shields.io/badge/license-MIT-18a058)
+
+[中文](#项目名) · [文档导航](#文档) · [更新日志](CHANGELOG.md) · [发版说明](docs/release.md)
 ```
 
-分类只用：`新增` / `修复` / `优化` / `不兼容` / `其它`。
+要点：
+
+- 「当前版本」那行**必须带日期**和一句“这版做了什么”，不能只写版本号；
+- 上一版本也要写，方便回退时知道前一版是什么；
+- 徽章里 `version` 必须和 `app/__init__.py` 一致，发版时一起改；
+- 徽章用 shields.io 静态徽章，不引入 CI 构建状态（避免显示失败），颜色沿用：版本 `2b7cff`、Python `3776ab`、通过类 `18a058`、警告类 `e5484d`。
+
+### RELEASE-NOTES 写法
+
+每个版本一个文件 `RELEASE-NOTES-vX.Y.Z.md`，固定小节：
+
+```markdown
+# v0.2.1 发版说明
+
+**发布日期**：2026-11-06
+**对比版本**：`v0.2.0` → `v0.2.1`（PATCH：只修问题）
+**提交**：`chore(release): v0.2.1`
+
+## 这一版做了什么        ← 一句话 + 说明这版的主题
+## 新增 / 修复 / 优化     ← 表格：问题 | 原因 | 现在怎么样
+## 已知限制               ← 还没验证到的部分，写清楚
+## 升级方式               ← 用户要做什么（通常只是重启）
+## 校验                   ← 跑过的命令与结果
+```
+
+「修复」用三列表格（问题 / 原因 / 现在），比只写“修了 xxx”有用：以后再看能知道当时为什么错。
+
+### CHANGELOG 写法
+
+`CHANGELOG.md` 只放条目，最新版本在最上面，开头三行写当前版本与上一版本：
+
+```markdown
+> ✅ **当前版本**：`v0.2.1` (2026-11-06) — 修 UC 子目录偶发 403
+> 上一版本：`v0.2.0` (2026-11-05) — 浅色界面改版 + 网盘管理页
+
+## v0.2.1 — 2026-11-06
+
+### 修复
+- UC 转存子目录文件时偶发 403
+```
+
+分类只用：`新增` / `修复` / `优化` / `不兼容` / `其它`。没有内容的小节直接不写。
 
 ---
 

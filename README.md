@@ -1,6 +1,24 @@
-# PanTransfer · 本地网盘批量转存
+# PanTransfer
 
-把别人分享的 **百度网盘 / 夸克网盘 / UC 网盘** 链接，批量转存到你自己的网盘目录。
+### 本地网盘批量转存 · 百度 / 夸克 / UC
+
+> ✅ **当前版本**：`v0.2.0` (2026-11-05) — 浅色界面改版 + 网盘管理页 + 自动调速
+> **上一版本**：`v0.1.0` (2026-11-04) — 首版：三网盘批量转存 + 任务进度
+> 详见 [RELEASE-NOTES-v0.2.0.md](RELEASE-NOTES-v0.2.0.md) + [CHANGELOG.md](CHANGELOG.md)
+
+**粘贴分享链接 → 自动读全目录 → 批量转存进自己的网盘 · 任务进度逐条可见 · 断点续跑 · 同名跳过**
+
+![version](https://img.shields.io/badge/version-0.2.0-2b7cff)
+![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
+![deps](https://img.shields.io/badge/dependencies-0-18a058)
+![license](https://img.shields.io/badge/license-MIT-18a058)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555)
+
+[中文](#panTransfer) · [文档导航](#文档) · [更新日志](CHANGELOG.md) · [发版说明](docs/release.md)
+
+---
+
+把别人分享的链接，批量转存到你自己的网盘目录。
 跑在本机 `127.0.0.1` 上的单页应用：侧边导航、任务进度、逐文件结果、账号管理、引擎设置。
 
 - 无账号体系、无登录墙、无会员限制、无遥测。
