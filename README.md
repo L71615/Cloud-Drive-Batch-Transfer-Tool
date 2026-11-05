@@ -90,6 +90,8 @@ python run.py --port 8765 --gateway http://127.0.0.1:8899
 | [docs/spec/baidu.md](docs/spec/baidu.md) | 百度网盘：登录态、请求头、`shorturlinfo`/`verify`+`sekey`、`share/list`、`share/transfer`、`api/list`·`api/create`·`api/quota`、errno 表 |
 | [docs/spec/quark.md](docs/spec/quark.md) | 夸克网盘：`sharepage/token`·`detail`·`save`、`task` 轮询、`file/sort`、`member`、状态码 |
 | [docs/spec/uc.md](docs/spec/uc.md) | UC 网盘：与夸克同构但端点独立；`pdir_fid` 必须与 `fid_list` 同源等实测约束 |
+| [docs/release.md](docs/release.md) | 提交信息怎么写、一次提交的范围、版本号怎么定、发版五步、推送失败排查 |
+| [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么（按 `新增`/`修复`/`优化`/`不兼容` 分类） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 洁净室规则、只用标准库、QPS 纪律、提交前检查 |
 | [LICENSE](LICENSE) | MIT |
 
