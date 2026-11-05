@@ -170,6 +170,28 @@ class Handler(BaseHTTPRequestHandler):
             except (ProviderError, AuthExpired) as e:
                 return self._err(400, f"读取目录失败：{e}")
             return self._send(200, {"ok": True, "path": target, "items": items})
+        if path == "/api/quota":
+            q = parse_qs(u.query)
+            provider = (q.get("provider") or [""])[0]
+            account_id = (q.get("account_id") or [""])[0]
+            cred = normalize((q.get("credential") or [""])[0])
+            if provider not in names():
+                return self._err(400, f"unknown provider: {provider}")
+            if not cred and account_id:
+                row = self.app.store.one(
+                    "SELECT credential FROM accounts WHERE id=? AND provider=?",
+                    (int(account_id), provider),
+                )
+                cred = (row or {}).get("credential", "")
+            try:
+                prov = create(provider, cred)
+                prov.qps = max(prov.qps, 1.0)
+                q2 = prov.quota()
+            except ProviderNotReady as e:
+                return self._err(400, str(e))
+            except (ProviderError, AuthExpired) as e:
+                return self._err(400, f"查询容量失败：{e}")
+            return self._send(200, {"ok": True, **q2})
         if path == "/api/accounts":
             rows = self.app.store.all(
                 "SELECT id,provider,name,created_at FROM accounts ORDER BY id DESC"

@@ -45,6 +45,7 @@
 
   /* ---------------- 路由 ---------------- */
   const TITLES = {
+    files: ['网盘管理', '浏览你自己网盘里的目录与文件'],
     transfer: ['新建转存', '粘贴分享链接，批量存入你的网盘'],
     tasks: ['转存任务', '实时进度 · 支持暂停 / 继续 / 取消'],
     accounts: ['账号管理', '保存你自己的登录态（仅本机）'],
@@ -60,6 +61,7 @@
     $('#pageTitle').textContent = t;
     $('#pageCrumb').textContent = c;
     location.hash = view;
+    if (view === 'files') initFiles();
     if (view === 'tasks') loadTasks();
     if (view === 'accounts') { loadAccounts(); }
     if (view === 'settings') loadSettings();
@@ -142,6 +144,15 @@
       tb.append(tr);
     });
     syncAccountSelect();
+    renderFoot(accounts[0]);
+  }
+
+  // 左下角的账号块，和桌面版那种"当前登录用户"一样
+  function renderFoot(acc) {
+    const p = acc ? providerInfo(acc.provider) : null;
+    $('#footAvatar').textContent = acc ? String(p.short || p.label).slice(0, 2) : '—';
+    $('#footName').textContent = acc ? (acc.name || p.label) : '未登录';
+    $('#footSub').textContent = acc ? p.label + ' · 已连接' : '点「账号管理」添加';
   }
 
   function syncAccountSelect() {
@@ -654,6 +665,135 @@
   }
 
   /* ---------------- 启动 ---------------- */
+  /* ---------------- 网盘管理（浏览自己的网盘） ---------------- */
+  const FILES = { provider: '', accountId: '', path: '/', items: [], q: '', sort: 'name' };
+
+  function filesAccount() {
+    return S.accounts.filter(a => a.provider === FILES.provider)[0] || null;
+  }
+
+  function quotaText(n) {
+    if (n === null || n === undefined) return '-';
+    if (n < 1024) return n + ' B';
+    const u = ['KB', 'MB', 'GB', 'TB'];
+    let v = n / 1024, i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + u[i];
+  }
+
+  async function initFiles() {
+    const acc = filesAccount() || S.accounts[0] || null;
+    if (acc) {
+      FILES.provider = acc.provider;
+      FILES.accountId = String(acc.id);
+    }
+    const p = providerInfo(FILES.provider || S.provider);
+    $('#filesTitle').textContent = acc ? (acc.name || p.label + ' 网盘') : '我的网盘';
+    $('#filesTag').textContent = p.label || '网盘';
+    if (!acc) {
+      $('#filesQuotaText').textContent = '还没有登录态';
+      $('#filesList').innerHTML = '';
+      $('#filesEmpty').hidden = false;
+      $('#filesEmpty').textContent = '还没有保存任何网盘的登录态，先去「账号管理」扫码登录';
+      return;
+    }
+    loadQuota();
+    await loadFiles('/');
+  }
+
+  async function loadQuota() {
+    try {
+      const q = await api(`/api/quota?provider=${encodeURIComponent(FILES.provider)}&account_id=${encodeURIComponent(FILES.accountId)}`);
+      const total = q.total || 0, used = q.used || 0;
+      $('#filesQuotaText').textContent = total ? `已用 ${quotaText(used)} / ${quotaText(total)}` : '容量未知';
+      $('#quotaFill').style.width = total ? Math.min(100, (used / total) * 100).toFixed(1) + '%' : '0%';
+    } catch (e) {
+      $('#filesQuotaText').textContent = '容量查询失败：' + e.message;
+    }
+  }
+
+  async function loadFiles(path) {
+    FILES.path = path || '/';
+    $('#filesNote').textContent = '读取中…';
+    $('#filesEmpty').hidden = true;
+    try {
+      const r = await api(`/api/browse?provider=${encodeURIComponent(FILES.provider)}` +
+        `&account_id=${encodeURIComponent(FILES.accountId)}&path=${encodeURIComponent(FILES.path)}`);
+      FILES.items = r.items || [];
+      renderFiles();
+    } catch (e) {
+      FILES.items = [];
+      $('#filesList').innerHTML = '';
+      $('#filesEmpty').hidden = false;
+      $('#filesEmpty').textContent = '读取失败：' + e.message;
+      $('#filesNote').textContent = '读取失败';
+    }
+  }
+
+  function crumbsFor(path) {
+    const box = $('#filesCrumbs');
+    const parts = (path || '/').split('/').filter(Boolean);
+    box.innerHTML = '<a data-p="/">全部文件</a>';
+    let acc = '';
+    parts.forEach(name => {
+      acc += '/' + name;
+      box.insertAdjacentHTML('beforeend', `<span class="sep">/</span><a data-p="${esc(acc)}">${esc(name)}</a>`);
+    });
+    $$('#filesCrumbs a').forEach(a => a.onclick = () => loadFiles(a.dataset.p));
+  }
+
+  function renderFiles() {
+    crumbsFor(FILES.path);
+    const q = FILES.q.trim().toLowerCase();
+    const list = FILES.items.filter(it => !q || it.name.toLowerCase().includes(q));
+    const dirs = list.filter(it => it.is_dir);
+    const files = list.filter(it => !it.is_dir);
+    if (FILES.sort === 'size') files.sort((a, b) => (b.size || 0) - (a.size || 0));
+    if (FILES.sort === 'time') files.reverse();
+    dirs.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+    const all = dirs.concat(files);
+
+    $('#filesCount').textContent = `${dirs.length} 个文件夹 · ${files.length} 个文件`;
+    $('#filesNote').textContent = FILES.path === '/' ? '根目录' : FILES.path;
+
+    const box = $('#filesList');
+    box.innerHTML = '';
+    const folderIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h4l2 2.5h6.5A2.5 2.5 0 0 1 20.5 10v7A2.5 2.5 0 0 1 18 19.5H5.5A2.5 2.5 0 0 1 3 17z"/></svg>`;
+    const fileIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>`;
+
+    all.forEach(it => {
+      const el = document.createElement('div');
+      el.className = 'frow' + (it.is_dir ? ' dir' : '');
+      el.innerHTML = `
+        <div class="fi">${it.is_dir ? folderIco : fileIco}</div>
+        <div class="fn" title="${esc(it.name)}">${esc(it.name)}</div>
+        <div class="fs">${it.is_dir ? '-' : quotalike(it.size)}</div>
+        <div class="ft">${it.is_dir ? '文件夹' : '文件'}</div>
+        <div class="fm">${esc(it.path || '')}</div>`;
+      if (it.is_dir) el.onclick = () => loadFiles(it.path);
+      box.append(el);
+    });
+    $('#filesEmpty').hidden = all.length > 0;
+    if (!all.length) $('#filesEmpty').textContent = q ? '没有匹配的文件名' : '这个目录是空的';
+  }
+
+  function quotalike(n) {
+    if (!n) return '-';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
+  }
+
+  function syncSortChips() {
+    $$('.files-toolbar .chip').forEach(c => {
+      const on = (c.id === 'sortSize' && FILES.sort === 'size')
+        || (c.id === 'sortTime' && FILES.sort === 'time')
+        || (c.dataset.default === '1' && FILES.sort === 'name');
+      c.classList.toggle('active', on);
+    });
+  }
+
   async function boot() {
     try {
       const meta = await api('/api/meta');
@@ -709,6 +849,11 @@
     $('#btnDiag').onclick = runDiag;
     $('#diagProvider').onchange = () => { syncDiagAccount(); $('#diagCard').hidden = true; $('#diagRawCard').hidden = true; };
     $('#btnRefresh').onclick = () => { loadTasks(); toast('已刷新'); };
+    $('#btnFilesRefresh').onclick = () => { loadFiles(FILES.path); loadQuota(); };
+    $('#filesSearch').oninput = () => { FILES.q = $('#filesSearch').value; renderFiles(); };
+    $('#sortSize').onclick = () => { FILES.sort = FILES.sort === 'size' ? 'name' : 'size'; syncSortChips(); renderFiles(); };
+    $('#sortTime').onclick = () => { FILES.sort = FILES.sort === 'time' ? 'name' : 'time'; syncSortChips(); renderFiles(); };
+    $('#fabNew').onclick = () => go('transfer');
     $('#taskFilter').onchange = () => { S.filter = $('#taskFilter').value; loadTasks(); };
     $('#mask').onclick = closeDrawer;
     $('#drawerClose').onclick = closeDrawer;
