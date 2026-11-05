@@ -14,7 +14,7 @@
 ![license](https://img.shields.io/badge/license-MIT-18a058)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555)
 
-[中文](#panTransfer) · [文档导航](#文档) · [更新日志](CHANGELOG.md) · [发版说明](docs/release.md)
+[中文](#pantransfer) · [文档导航](#文档) · [更新日志](CHANGELOG.md) · [发版说明](docs/release.md)
 
 ---
 
