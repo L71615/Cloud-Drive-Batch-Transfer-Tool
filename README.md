@@ -2,13 +2,13 @@
 
 ### 本地网盘批量转存 · 百度 / 夸克 / UC
 
-> ✅ **当前版本**：`v0.3.0` (2026-11-06) — 桌面版：双击图标即开，独立窗口 + 内嵌图标
-> **上一版本**：`v0.2.0` (2026-11-05) — 浅色界面改版 + 网盘管理页 + 自动调速
-> 详见 [RELEASE-NOTES-v0.3.0.md](RELEASE-NOTES-v0.3.0.md) + [CHANGELOG.md](CHANGELOG.md)
+> ✅ **当前版本**：`v0.3.1` (2026-11-06) — 桌面启动健壮性：窗口加载失败自动退回浏览器
+> **上一版本**：`v0.3.0` (2026-11-06) — 桌面版：双击图标即开，独立窗口 + 内嵌图标
+> 详见 [RELEASE-NOTES-v0.3.1.md](RELEASE-NOTES-v0.3.1.md) + [CHANGELOG.md](CHANGELOG.md)
 
 **粘贴分享链接 → 自动读全目录 → 批量转存进自己的网盘 · 任务进度逐条可见 · 断点续跑 · 同名跳过**
 
-![version](https://img.shields.io/badge/version-0.3.0-2b7cff)
+![version](https://img.shields.io/badge/version-0.3.1-2b7cff)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
 ![deps](https://img.shields.io/badge/dependencies-0-18a058)
 ![license](https://img.shields.io/badge/license-MIT-18a058)
@@ -43,6 +43,7 @@ build.bat          # 双击：打包成 dist\PanTransfer\PanTransfer.exe，并�
 - 数据和日志都在 `<程序目录>\data\`（整个文件夹可以拷到 U 盘带走）；想换地方就挪文件夹。
 - 端口默认 8765，被别的程序占了会自动往下找，并且把选中的端口记在 `data\current_port`；第二次双击会复用已开的实例，不会起两个。
 - 已经打包好但快捷方式丢了：双击 [make_shortcut.bat](make_shortcut.bat) 重建。
+- 极少数机器上应用窗口会打不开（浏览器渲染异常）：程序会在 25 秒后自动关掉那个空窗口，改用默认浏览器打开同一界面，功能完全一样，只是多了地址栏；这种模式下 30 分钟没人操作会自动退出，不会留后台进程。
 
 ## 快速开始
 

@@ -20,8 +20,11 @@ import threading
 import time
 import traceback
 import urllib.request
+import webbrowser
 
 APP_NAME = "PanTransfer"
+# 页面 <title>：窗口加载完成后窗口标题就是这个，用来判断窗口是否已经开起来
+APP_TITLE = "PanTransfer · 批量转存"
 DEFAULT_PORT = 8765
 
 
@@ -192,16 +195,100 @@ def open_window(url: str) -> subprocess.Popen:
         "--disable-features=msEdgeWelcomePage,msImplicitSignin,EdgeSyncConsent,msEdgeSyncConsent",
         "--disable-background-networking",
     ]
+    if os.environ.get("PANTRANSFER_UI_TAB") == "1":
+        # 调试用：不开应用窗口，改成普通标签页，用来判断白屏是不是 --app 模式导致
+        args[1] = url
     extra = os.environ.get("PANTRANSFER_UI_ARGS", "").strip()
     if extra:
         args += extra.split()
     log("open window: " + " ".join(args))
+    # 打包后进程里带着 PyInstaller 自己的环境变量（_PYI_* / _MEI*），
+    # 传给浏览器会让它的渲染进程起不来（窗口白屏），这里清掉。
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("_PYI", "_MEI", "PYINSTALLER"))}
+    if os.environ.get("PANTRANSFER_SHELL") == "1":
+        # 交给 Windows Shell 启动：浏览器进程不再是我们 exe 的子进程，
+        # 用于排查"打包后子进程渲染异常"这类环境问题。
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "open", args[0], " ".join(args[1:]), None, 1)
+        log(f"ShellExecuteW -> {rc}")
+        return None
     # CREATE_NO_WINDOW：不要给浏览器弹出控制台
-    return subprocess.Popen(args, creationflags=0x08000000 if os.name == "nt" else 0)
+    # 三路输出接到空设备：打包成 GUI 程序后自身没有标准句柄，
+    # 直接继承会让浏览器子进程拿到无效句柄（表现是窗口白屏、渲染进程不响应）。
+    return subprocess.Popen(
+        args,
+        creationflags=0x08000000 if os.name == "nt" else 0,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def wait_idle(port: int, limit: float = 1800.0) -> None:
+    """退回浏览器模式时用：半天没人访问就把后台服务关掉，别留隐形进程。"""
+    while True:
+        info = health(port)
+        if info is None:
+            return
+        if float(info.get("idle") or 0) > limit:
+            log(f"idle {limit:.0f}s, stopping server")
+            return
+        time.sleep(20.0)
+
+
+def wait_page_loaded(timeout: float = 25.0) -> bool:
+    """等窗口标题变成页面标题，说明界面真的渲染出来了。"""
+    start = time.time()
+    while time.time() - start < timeout:
+        if _window_exists(APP_TITLE):
+            return True
+        time.sleep(0.8)
+    return False
+
+
+def wait_window_gone(port: int, boot_timeout: float = 120.0) -> None:
+    """Shell 启动时拿不到进程句柄，就靠窗口标题判断：出现过后消失即视为关闭。"""
+    want = f"127.0.0.1:{port}"
+    seen = False
+    start = time.time()
+    while True:
+        alive = _window_exists(want) or _window_exists(APP_TITLE)
+        if alive:
+            seen = True
+        elif seen:
+            return
+        elif time.time() - start > boot_timeout:
+            # 窗口一直没出现：不再无限等，交给用户关进程
+            log("window never appeared, keep server running")
+            return
+        time.sleep(1.5)
+
+
+def _window_exists(needle: str) -> bool:
+    try:
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def _cb(hwnd, _lparam):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if needle and needle in buf.value:
+                found.append(buf.value)
+                return False
+            return True
+
+        user32.EnumWindows(_cb, None)
+        return bool(found)
+    except Exception:
+        return False
 
 
 def message_box(text: str, title: str = APP_NAME) -> None:
-    log("message_box: " + text.replace("\n", " / "))
     if os.environ.get("PANTRANSFER_SILENT") == "1":
         return
     try:
@@ -247,7 +334,6 @@ def main() -> int:
             proc = open_window(url)
         except Exception as exc:
             message_box(f"打不开应用窗口：{exc}\n\n已用默认浏览器打开。")
-            import webbrowser
             webbrowser.open(url)
             try:
                 while True:
@@ -256,7 +342,27 @@ def main() -> int:
                 pass
             return 1
 
-        proc.wait()
+        if proc is None:
+            # Shell 启动拿不到进程句柄：改成轮询窗口是否还在
+            if not wait_page_loaded():
+                log("window did not show the page, opening default browser")
+                webbrowser.open(url)
+                wait_idle(port)
+            else:
+                wait_window_gone(port)
+        else:
+            if not wait_page_loaded():
+                # 应用窗口起不来（个别环境的浏览器问题）：关掉白窗口，退回默认浏览器，
+                # 界面一样能用，只是多了地址栏。
+                log("window did not show the page, opening default browser")
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                webbrowser.open(url)
+                wait_idle(port)
+            else:
+                proc.wait()
         log("window closed, stopping server")
         try:
             httpd.shutdown()

@@ -22,6 +22,7 @@ import os
 import posixpath
 import re
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -52,6 +53,12 @@ class App:
         self.store = Store(db_path)
         self.runner = TaskRunner(self.store, workers=workers)
         self.runner.recover_orphans()
+        # 最近一次收到请求的时间：桌面启动器在"窗口没起来、退回浏览器"时
+        # 用它在长时间没人用时自动退出，避免留下一个看不见的后台进程。
+        self.last_hit = time.time()
+
+    def idle_seconds(self) -> float:
+        return max(0.0, time.time() - self.last_hit)
 
     def close(self) -> None:
         self.runner.shutdown()
@@ -93,6 +100,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 路由 ----------
     def do_GET(self):
+        # 健康检查不算"有人在用"：启动器自己会定时探活，否则永远退不出去
+        if not self.path.startswith("/api/health"):
+            self.app.last_hit = time.time()
         try:
             self._route_get()
         except Exception as e:  # noqa: BLE001
@@ -100,6 +110,7 @@ class Handler(BaseHTTPRequestHandler):
             self._err(500, f"{type(e).__name__}: {e}")
 
     def do_POST(self):
+        self.app.last_hit = time.time()
         try:
             self._route_post()
         except Exception as e:  # noqa: BLE001
@@ -107,6 +118,7 @@ class Handler(BaseHTTPRequestHandler):
             self._err(500, f"{type(e).__name__}: {e}")
 
     def do_DELETE(self):
+        self.app.last_hit = time.time()
         try:
             u = urlparse(self.path)
             m = ACCOUNT_ONE.match(u.path)
@@ -137,6 +149,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "version": __version__,
                 "providers": self._provider_caps(),
+                "idle": round(self.app.idle_seconds(), 1),
             })
         if path == "/api/providers":
             return self._send(200, {"ok": True, "providers": self._provider_caps()})

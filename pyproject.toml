@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pantransfer"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local batch-save tool for Baidu / Quark / UC share links"
 readme = "README.md"
 requires-python = ">=3.10"
