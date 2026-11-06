@@ -264,6 +264,12 @@ https://drive.uc.cn/s/zyxwvu987654"></textarea>
           <input id="setRetries" type="number" min="0" max="10">
           <label class="f">默认转存目录</label>
           <input id="setTarget" value="/PanTransfer">
+          <label class="f">目标目录里已有同名文件时</label>
+          <select id="setDup">
+            <option value="skip">跳过（推荐：重跑不会堆出一串副本）</option>
+            <option value="newcopy">保留副本（网盘自动改名 xxx(1).mp4）</option>
+            <option value="overwrite">覆盖（先删旧的再转；百度暂不支持）</option>
+          </select>
           <div class="row" style="margin-top:16px">
             <button id="btnSaveSet">保存设置</button>
             <span class="hint-line" id="setHint"></span>

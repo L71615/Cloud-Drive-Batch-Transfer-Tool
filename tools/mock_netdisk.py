@@ -127,6 +127,8 @@ class State:
         self.cd_dirs: dict[str, str] = {"/": "0"}
         self.cd_fid_dir: dict[str, str] = {"0": "/"}
         self.cd: dict[str, dict] = {}
+        # 百度异步转存任务：taskid -> {"to": [...]}，第一次查询就完成
+        self.baidu_tasks: dict[str, list] = {}
         self.seq = 0
         # share_fid_token：真实服务端只校验"归属 + 有效期"，可重复提交；
         # 这里签发后记住 owner，用来回归"pdir_fid 传错"和"token 串了"两类 bug
@@ -223,7 +225,11 @@ class Handler(BaseHTTPRequestHandler):
                     "isdir": False, "size": int(src.get("size") or 0),
                     "md5": str(src.get("md5") or ""), "fid": self.state.new_fid("bf"),
                 })
-            return self._json({"errno": 0, "extra": {"list": to}})
+            # 真实接口是异步的（async=1）：先回 taskid，再轮询 taskquery。
+            # 这里也照这个形状回，第一次查询就给结果——让"没轮询"的实现跑不过测试。
+            taskid = self.state.new_fid("task")
+            self.state.baidu_tasks[taskid] = to
+            return self._json({"errno": 0, "taskid": taskid, "extra": {"list": []}})
 
         if p == "/baidu/api/create":
             if not self._guard("baidu"):
@@ -305,6 +311,18 @@ class Handler(BaseHTTPRequestHandler):
             st.mkdirs += 1
             return self._json({"status": 0, "code": 0, "data": {"fid": fid}})
 
+        if p == "/cd/1/clouddrive/file/delete":
+            if not self._guard("cd"):
+                return
+            st = self.state
+            gone = []
+            for fid in body.get("file_list") or []:
+                for path, meta in list(st.cd.items()):
+                    if str(meta.get("fid")) == str(fid):
+                        st.cd.pop(path, None)
+                        gone.append(path)
+            return self._json({"status": 0, "code": 0, "data": {"task_id": "", "removed": gone}})
+
         self._json({"status": 404, "message": f"no route {p}"}, 404)
 
     def do_GET(self) -> None:  # noqa: N802
@@ -317,6 +335,16 @@ class Handler(BaseHTTPRequestHandler):
             if not share:
                 return self._json({"errno": -62})
             return self._json({"errno": 0, "shareid": share["shareid"], "uk": share["uk"]})
+
+        if p == "/baidu/share/taskquery":
+            if not self._guard("baidu"):
+                return
+            taskid = str(q.get("taskid") or "")
+            to = self.state.baidu_tasks.get(taskid)
+            if to is None:
+                return self._json({"errno": 31066})
+            self.state.baidu_tasks.pop(taskid, None)
+            return self._json({"errno": 0, "status": 2, "taskid": taskid, "extra": {"list": to}})
 
         if p == "/baidu/share/list":
             if not self._guard("baidu"):

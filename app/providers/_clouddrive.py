@@ -48,6 +48,7 @@ class CloudDrive(Provider):
     P_TASK = "/1/clouddrive/task"
     P_SORT = "/1/clouddrive/file/sort"
     P_FILE = "/1/clouddrive/file"
+    P_DELETE = "/1/clouddrive/file/delete"
     P_MEMBER = "/1/clouddrive/member"
 
     def __init__(self, credential: str = ""):
@@ -398,6 +399,31 @@ class CloudDrive(Provider):
             self._dirs[key] = found
             fid = found
         return fid
+
+    def delete(self, path: str) -> bool:
+        """删掉目标目录里的一个文件（「覆盖同名」策略用）。
+
+        语义：进回收站（action_type=2），不是物理删除。
+        """
+        path = str(path or "")
+        parent, _, name = path.rpartition("/")
+        fid = self._fid_for(parent or "/")
+        target = ""
+        for ch in self._children(fid):
+            if not ch.get("dir") and str(ch.get("file_name")) == name:
+                target = str(ch.get("fid") or "")
+                break
+        if not target:
+            return False
+        d = self._api(self.P_DELETE, "POST", body={
+            "action_type": 2,
+            "file_list": [target],
+            "exclude_fids": [],
+        })
+        task_id = d.get("task_id") or ""
+        if task_id:
+            self._wait_task(str(task_id))
+        return True
 
     def browse(self, path: str = "/") -> list[dict]:
         fid = self._fid_for(path or "/")

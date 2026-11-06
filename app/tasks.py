@@ -57,6 +57,8 @@ DEFAULT_SETTINGS = {
     "qps": 2.5,
     "retries": 3,
     "default_target": "/PanTransfer",
+    # 目标目录里已有同一个文件怎么办：skip 跳过 / newcopy 保留副本 / overwrite 先删再转
+    "dup_policy": "skip",
 }
 
 
@@ -120,6 +122,10 @@ class TaskRunner:
                 try:
                     if k == "default_target":
                         cur[k] = str(patch[k]).strip() or DEFAULT_SETTINGS[k]
+                    elif k == "dup_policy":
+                        v = str(patch[k]).strip()
+                        if v in ("skip", "newcopy", "overwrite"):
+                            cur[k] = v
                     else:
                         cur[k] = max(1, int(float(patch[k]))) if k != "qps" else max(0.2, min(10.0, float(patch[k])))
                 except (TypeError, ValueError):
@@ -271,16 +277,22 @@ class TaskRunner:
             if not refs:
                 raise ProviderNotReady("没有解析到分享链接，请检查粘贴内容")
 
-            # 目标目录里"同一个路径"已经有文件就跳过：重跑/重试/重复粘贴时不会
-            # 在网盘里堆一串 xxx(1).mp4。判定用完整路径而不是文件名——不同分享
-            # 里同名不同内容的文件（每个资源都带一样的教程/说明）很常见，按名字
-            # 跳会让任务显示成功、盘里却没东西。
+            # 目标目录里"同一个路径"已经有文件怎么办——按设置里的策略走：
+            #   skip      跳过（默认）：重跑/重试/重复粘贴时不会堆一串 xxx(1).mp4
+            #   newcopy   照转，交给网盘自动改名（要保留两份时用）
+            #   overwrite 先删掉目标目录里的同名文件再转（要更新成新内容时用）
+            # 判定用完整路径而不是文件名——不同分享里同名不同内容的文件
+            # （每个资源都带一样的教程/说明）很常见，按名字跳会让任务显示成功、盘里却没东西。
+            policy = str(cfg.get("dup_policy") or "skip")
+            if policy not in ("skip", "newcopy", "overwrite"):
+                policy = "skip"
             existing: set[str] = set()
-            try:
-                for it in _walk_files(prov, task["target"]):
-                    existing.add(it)
-            except Exception:  # noqa: BLE001 - 目录不存在或接口不支持都不该拖垮任务
-                existing = set()
+            if policy != "newcopy":
+                try:
+                    for it in _walk_files(prov, task["target"]):
+                        existing.add(it)
+                except Exception:  # noqa: BLE001 - 目录不存在或接口不支持都不该拖垮任务
+                    existing = set()
 
             # 边读目录边转存：大分享不必等整棵树读完才开始，进度条一直在走。
             # 攒够一批再一次 save（官方接口支持 fid_list 数组），十来个文件一次请求，比逐个快很多。
@@ -317,15 +329,48 @@ class TaskRunner:
                             continue
                         want = f"{task['target'].rstrip('/')}{entry.path}"
                         if want in existing:
-                            skipped += 1
-                            self.store.run(
-                                "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
-                                " VALUES(?,?,?,?,?,?,?)"
-                                " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
-                                " dst=excluded.dst,error=excluded.error",
-                                (task_id, entry.path, entry.size, entry.digest,
-                                 want, "skipped", "目标目录里已有同一个文件"),
-                            )
+                            if policy == "skip":
+                                skipped += 1
+                                self.store.run(
+                                    "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                    " VALUES(?,?,?,?,?,?,?)"
+                                    " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
+                                    " dst=excluded.dst,error=excluded.error",
+                                    (task_id, entry.path, entry.size, entry.digest,
+                                     want, "skipped", "目标目录里已有同一个文件"),
+                                )
+                            elif policy == "overwrite":
+                                # 覆盖：先删目标里的同名文件，再照常转存。
+                                # 删不掉（权限/不支持）就让这次转存失败并写清原因，
+                                # 不要退化成"跳过"——用户选覆盖就是想拿到新内容。
+                                try:
+                                    prov.delete(want)
+                                    existing.discard(want)
+                                except ProviderError as exc:
+                                    failed += 1
+                                    self.store.run(
+                                        "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                        " VALUES(?,?,?,?,?,?,?)"
+                                        " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
+                                        " dst=excluded.dst,error=excluded.error",
+                                        (task_id, entry.path, entry.size, entry.digest, want,
+                                         "failed", f"覆盖同名失败：{exc}"),
+                                    )
+                                    seen += 1
+                                    self.store.run(
+                                        "UPDATE tasks SET total=?,failed=?,skipped=?,updated_at=? WHERE id=?",
+                                        (done + len(queue), failed, skipped, now(), task_id),
+                                    )
+                                    continue
+                                else:
+                                    queue.append((ref, entry))
+                                    self.store.run(
+                                        "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                        " VALUES(?,?,?,?,?,?,?)"
+                                        " ON CONFLICT(task_id,src) DO UPDATE SET status='pending',error=''",
+                                        (task_id, entry.path, entry.size, entry.digest, "", "pending", ""),
+                                    )
+                            # newcopy：不判重，直接进队列，让网盘自己生成 (1)(2) 副本
                         else:
                             queue.append((ref, entry))
                             # 先落成 pending：任务详情里能马上看到"要转哪些"，

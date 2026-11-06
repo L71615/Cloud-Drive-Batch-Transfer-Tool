@@ -53,9 +53,19 @@
 `POST /share/transfer?shareid=&from=<uk>&sekey=<sekey>&ondup=newcopy&async=1&channel=chunlei&web=1&app_id=250528&clienttype=0`
 
 - 表单：`fsidlist=[<fs_id>,...]`（JSON 数组字符串）、`path=<目标目录绝对路径>`。
-- 成功：`{errno:0, extra:{list:[{from, to}]}}`，`to` 即落盘路径；没有 `to` 时按
-  `<目标目录>/<文件名>` 推断。
+- **异步**：带 `async=1` 时成功只回 `{errno:0, taskid:"<id>", extra:{list:[]}}`，
+  落点必须再查 §5.1 的任务；`extra.list` 为空且没有 taskid 时不能按路径猜（会把失败当成功）。
 - 目标目录不存在时先建目录（§6）。
+
+## §5.1 转存任务查询
+
+`GET /share/taskquery?taskid=<id>&channel=chunlei&web=1&app_id=250528&clienttype=0`
+
+- `{errno:0, status:2, extra:{list:[{from,to}]}}` → 完成，`extra.list[].to` 即落点。
+- `status`：`0/1` 处理中（继续轮询，间隔 0.6s、上限 300s）、`2/3` 完成、`4/5` 失败。
+- `errno` 非 0 时按 §8 表翻译（如 `31066` 任务不存在）。
+- 实测 2026-11-06：不带 taskid 的同步回执在部分账号下始终是空 `extra.list`，
+  因此一律走「拿 taskid → 轮询」这条路。
 
 ## §6 目录与容量
 

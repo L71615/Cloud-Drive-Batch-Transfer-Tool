@@ -113,6 +113,10 @@ class Provider(abc.ABC):
     def quota(self) -> dict:
         raise ProviderNotReady(f"{self.name}: quota 未实现")
 
+    def delete(self, path: str) -> bool:
+        """删除目标目录里的一个文件（「覆盖同名」策略用）。"""
+        raise ProviderNotReady(f"{self.name}: 不支持删除，覆盖同名策略不可用")
+
     def diagnose(self, ref: ShareRef) -> list[dict]:
         """分段跑一次最小链路，供界面"协议诊断"用。不改动任何数据。"""
         steps: list[dict] = []

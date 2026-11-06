@@ -633,6 +633,7 @@
     $('#setQps').value = settings.qps ?? 2.5;
     $('#setRetries').value = settings.retries ?? 3;
     $('#setTarget').value = settings.default_target ?? '/PanTransfer';
+    $('#setDup').value = settings.dup_policy ?? 'skip';
     $('#target').value = settings.default_target ?? '/PanTransfer';
     refreshRates();
   }
@@ -657,6 +658,7 @@
         qps: Number($('#setQps').value),
         retries: Number($('#setRetries').value),
         default_target: $('#setTarget').value.trim() || '/PanTransfer',
+        dup_policy: $('#setDup').value,
       });
       note('#setHint', '已保存');
       toast('设置已保存', 'ok');

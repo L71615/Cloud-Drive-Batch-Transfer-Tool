@@ -71,6 +71,20 @@ JSON：`{"pwd_id": "<分享id>", "passcode": "<提取码或空>"}`
 `GET /1/clouddrive/task?pr=ucpro&fr=pc&task_id=<id>&retry_index=0`
 → `data.status`：`2` 成功、`3/4` 失败，其余视为进行中；轮询间隔 0.5s，上限 120s。
 
+### §5.1 删除（"覆盖同名"用）
+
+`POST /1/clouddrive/file/delete?pr=ucpro&fr=pc`
+
+```json
+{"action_type": 2, "file_list": ["<fid>"], "exclude_fids": []}
+```
+
+- `action_type=2` 进回收站（可恢复），`1` 是彻底删除——只用 2。
+- 返回 `data.task_id`，非空时按上面的任务接口等它完成。
+- 要先按名字 + 父目录找到 fid，所以删除的粒度是"单个文件"。
+- **百度没有等价实现**：`/api/filemanager` 需要 bdstoken，当前未采集，界面上「覆盖」
+  对百度会明确报错，请用「跳过」或「保留副本」。
+
 ## §6 我的目录 / 容量
 
 - 列目录：`GET /1/clouddrive/file/sort?pdir_fid=<fid>&_page=1&_size=200&_fetch_total=1&_sort=file_type:asc,file_name:asc`

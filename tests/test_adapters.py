@@ -252,6 +252,91 @@ class AdapterTest(unittest.TestCase):
             runner.shutdown()
             store.close()
 
+    def test_dup_policy_overwrite_republishes(self):
+        """覆盖同名：目标里已有同名文件时先删再转，最终仍是 1 份而不是跳过。"""
+        import os
+        import tempfile
+        from app.db import Store
+        from app.tasks import TaskRunner
+
+        tmp = tempfile.mkdtemp()
+        store = Store(os.path.join(tmp, "t.db"))
+        runner = TaskRunner(store, workers=1)
+        cred = "__pus=abc"
+        link = "https://pan.quark.cn/s/a1b2c3d4e5f6"
+        try:
+            runner.update_settings({"dup_policy": "overwrite"})
+            tid = runner.create_task("quark", link, "/Over", cred)
+            first = self._wait(runner, tid)
+            self.assertEqual(first["status"], "done", first.get("error"))
+            n1 = first["done"]
+            self.assertGreaterEqual(n1, 2)
+
+            tid2 = runner.create_task("quark", link, "/Over", cred)
+            second = self._wait(runner, tid2)
+            self.assertEqual(second["status"], "done", second.get("error"))
+            self.assertEqual(second["skipped"], 0, "overwrite must not skip")
+            self.assertEqual(second["failed"], 0, "delete-then-save should succeed")
+            self.assertEqual(second["done"], n1, "same file count after overwrite")
+
+            p = self._p(QuarkProvider, cookie=cred)
+            names = [x["name"] for x in p.browse("/Over") if not x["is_dir"]]
+            self.assertEqual(len(names), len(set(names)), f"should not duplicate: {names}")
+        finally:
+            runner.update_settings({"dup_policy": "skip"})
+            runner.shutdown()
+            store.close()
+
+    def test_dup_policy_newcopy_keeps_copy(self):
+        """保留副本：不判重直接转，网盘里会出现两份（服务端自动改名）。"""
+        import os
+        import tempfile
+        from app.db import Store
+        from app.tasks import TaskRunner
+
+        tmp = tempfile.mkdtemp()
+        store = Store(os.path.join(tmp, "t.db"))
+        runner = TaskRunner(store, workers=1)
+        cred = "__pus=abc"
+        link = "https://pan.quark.cn/s/a1b2c3d4e5f6"
+        try:
+            runner.update_settings({"dup_policy": "newcopy"})
+            tid = runner.create_task("quark", link, "/Copy", cred)
+            first = self._wait(runner, tid)
+            self.assertEqual(first["status"], "done", first.get("error"))
+            n1 = first["done"]
+
+            tid2 = runner.create_task("quark", link, "/Copy", cred)
+            second = self._wait(runner, tid2)
+            self.assertEqual(second["status"], "done", second.get("error"))
+            self.assertEqual(second["skipped"], 0)
+            self.assertEqual(second["done"], n1, "newcopy should transfer again")
+        finally:
+            runner.update_settings({"dup_policy": "skip"})
+            runner.shutdown()
+            store.close()
+
+    def test_baidu_transfer_polls_task(self):
+        """百度转存是异步的：mock 只回 taskid，结果得靠 taskquery 拿。"""
+        p = self._p(BaiduProvider, cookie="BDUSS=abc")
+        ref = p.parse_links("https://pan.baidu.com/s/1AbCdEf?pwd=x9y8")[0]
+        entries = list(p.list_share(ref))
+        self.assertTrue(entries)
+        dsts = p.transfer_batch(ref, entries[:2], "/Async")
+        self.assertEqual(len(dsts), 2)
+        for d in dsts:
+            self.assertTrue(d.startswith("/Async/"), d)
+        # 落点必须真的在网盘里——不是"猜一个路径"
+        names = {x["name"] for x in p.browse("/Async")}
+        self.assertEqual({d.rsplit("/", 1)[-1] for d in dsts}, names)
+
+    def test_baidu_unknown_task_raises(self):
+        """taskquery 查不到任务时抛错，不能当作成功。"""
+        from app.providers.base import ProviderError
+        p = self._p(BaiduProvider, cookie="BDUSS=abc")
+        with self.assertRaises(ProviderError):
+            p._wait_transfer("no-such-task")
+
 
 if __name__ == "__main__":
     unittest.main()

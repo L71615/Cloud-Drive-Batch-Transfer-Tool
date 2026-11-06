@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from urllib.parse import unquote
 
 from . import register
@@ -26,6 +27,10 @@ PWD_RE = re.compile(r"(?:pwd|提取码|密码)\s*[=:：]?\s*([0-9A-Za-z]{4})", r
 
 MAX_DEPTH = 8
 MAX_ENTRIES = 5000
+
+# 转存是异步的（async=1）：提交后拿 taskid，再轮询 taskquery。
+POLL_INTERVAL = 0.6
+POLL_TIMEOUT = 300.0   # 秒；单批转存的等待上限
 
 # errno 含义需随实机响应逐步收敛（spec §8），未收录的码会原样带出来
 ERRNO = {
@@ -224,6 +229,31 @@ class BaiduProvider(Provider):
         return cur or "/"
 
     # ---------------- 转存 ----------------
+    def _wait_transfer(self, task_id: str, what: str = "转存") -> list:
+        """转存是异步的：提交后拿 taskid，再轮询 taskquery 直到完成。
+
+        返回服务端给的落点列表（`extra.list`），拿不到就抛错而不是"猜一个路径"——
+        猜出来的路径会让失败的转存看起来像成功。
+        """
+        deadline = time.time() + POLL_TIMEOUT
+        last = ""
+        while time.time() < deadline:
+            d = self._c().request(
+                "GET", self.BASE + "/share/taskquery",
+                params={"taskid": task_id, **self._common()},
+            )
+            d = self._check(d, what + "任务")
+            lst = (d.get("extra") or {}).get("list") or []
+            status = d.get("status")
+            text = str(status).lower()
+            if lst and (status in (2, 3, None) or text in ("success", "done", "finished")):
+                return lst
+            if status in (4, 5) or text in ("fail", "failed", "error"):
+                raise ProviderError(f"百度{what}任务失败：status={status}")
+            last = f"status={status}"
+            time.sleep(POLL_INTERVAL)
+        raise ProviderError(f"百度{what}任务 {task_id} 超过 {POLL_TIMEOUT // 60} 分钟仍未完成（{last}）")
+
     def transfer(self, ref: ShareRef, entry: Entry, target: str) -> str:
         return self.transfer_batch(ref, [entry], target)[0]
 
@@ -243,7 +273,11 @@ class BaiduProvider(Provider):
             form=True,
         )
         d = self._check(data, "转存")
-        got = [str(item.get("to")) for item in (d.get("extra") or {}).get("list") or [] if item.get("to")]
+        task_id = d.get("taskid") or d.get("task_id")
+        if task_id:
+            got = [str(item.get("to")) for item in self._wait_transfer(str(task_id)) if item.get("to")]
+        else:
+            got = [str(item.get("to")) for item in (d.get("extra") or {}).get("list") or [] if item.get("to")]
         base = dest.rstrip("/")
         out = []
         for e in entries:
@@ -263,6 +297,11 @@ class BaiduProvider(Provider):
             )
             for x in self._list_dir(path)
         ]
+
+    def delete(self, path: str) -> bool:
+        raise ProviderNotReady(
+            "百度网盘的「覆盖同名」需要 bdstoken，当前没实现；请改用「跳过」或「保留副本」"
+        )
 
     def browse(self, path: str = "/") -> list[dict]:
         base = str(path or "/").rstrip("/")
