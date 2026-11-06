@@ -2,13 +2,13 @@
 
 ### 本地网盘批量转存 · 百度 / 夸克 / UC
 
-> ✅ **当前版本**：`v0.2.0` (2026-11-05) — 浅色界面改版 + 网盘管理页 + 自动调速
-> **上一版本**：`v0.1.0` (2026-11-04) — 首版：三网盘批量转存 + 任务进度
-> 详见 [RELEASE-NOTES-v0.2.0.md](RELEASE-NOTES-v0.2.0.md) + [CHANGELOG.md](CHANGELOG.md)
+> ✅ **当前版本**：`v0.3.0` (2026-11-06) — 桌面版：双击图标即开，独立窗口 + 内嵌图标
+> **上一版本**：`v0.2.0` (2026-11-05) — 浅色界面改版 + 网盘管理页 + 自动调速
+> 详见 [RELEASE-NOTES-v0.3.0.md](RELEASE-NOTES-v0.3.0.md) + [CHANGELOG.md](CHANGELOG.md)
 
 **粘贴分享链接 → 自动读全目录 → 批量转存进自己的网盘 · 任务进度逐条可见 · 断点续跑 · 同名跳过**
 
-![version](https://img.shields.io/badge/version-0.2.0-2b7cff)
+![version](https://img.shields.io/badge/version-0.3.0-2b7cff)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
 ![deps](https://img.shields.io/badge/dependencies-0-18a058)
 ![license](https://img.shields.io/badge/license-MIT-18a058)
@@ -25,6 +25,24 @@
 - 只用 **Python 标准库**，零第三方依赖，`python run.py` 即跑。
 - 所有请求都用**你自己的** Cookie / 登录态，不内置任何 AppKey、密钥或代登录服务。
 - 非官方作品，与百度、夸克、UC 及其关联公司无任何关系。
+
+## 桌面版（双击即开）
+
+不想看到浏览器地址栏，就把程序打成桌面软件：
+
+```bash
+build.bat          # 双击：打包成 dist\PanTransfer\PanTransfer.exe，并创建桌面快捷方式
+```
+
+之后桌面上就有 **PanTransfer 图标**，双击直接弹出独立窗口（无地址栏、无标签页、任务栏有图标），关掉窗口服务自动退出。
+
+细节：
+
+- 图标是内嵌在 exe 里的，窗口标题栏/任务栏用的同一张；图标由 [tools/make_icon.py](tools/make_icon.py) 用标准库现画（不依赖任何图片素材）。
+- 窗口是用系统 Edge/Chrome 的 `--app` 模式打开的，**独立 profile**，不碰你日常浏览器的书签和登录态。
+- 数据和日志都在 `<程序目录>\data\`（整个文件夹可以拷到 U 盘带走）；想换地方就挪文件夹。
+- 端口默认 8765，被别的程序占了会自动往下找，并且把选中的端口记在 `data\current_port`；第二次双击会复用已开的实例，不会起两个。
+- 已经打包好但快捷方式丢了：双击 [make_shortcut.bat](make_shortcut.bat) 重建。
 
 ## 快速开始
 
