@@ -88,6 +88,20 @@ CD_TREE = {
 }
 
 
+def install_long_name(share_id: str = "longname01", length: int = 300) -> str:
+    """造一条含超长文件名的分享，用来验证"坏名字只影响它自己"。"""
+    SHARE_TREES[share_id] = {
+        "0": [
+            {"fid": "ln1", "file_name": "ok.txt", "size": 10, "dir": False,
+             "share_fid_token": "lnt1", "pdir_fid": "pr9"},
+            {"fid": "ln2", "file_name": "长" * length + ".mp4", "size": 99, "dir": False,
+             "share_fid_token": "lnt2", "pdir_fid": "pr9"},
+        ],
+    }
+    CD_SHARE[share_id] = {"pwd": ""}
+    return share_id
+
+
 def _parent(p: str) -> str:
     p = (p or "/").rstrip("/") or "/"
     i = p.rfind("/")

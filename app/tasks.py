@@ -17,6 +17,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from .db import Store, now
+from .names import name_problem, normalize_dir
 from .providers import create
 from .providers.base import AuthExpired, Entry, ProviderError, ProviderNotReady, ShareRef
 
@@ -141,6 +142,12 @@ class TaskRunner:
     def create_task(self, provider: str, links: str, target: str, credential: str = "") -> str:
         task_id = uuid.uuid4().hex[:12]
         ts = now()
+        # 目录先规整：`/a//b/` 与 `/a/b` 是同一个地方，不统一的话建目录、判重、
+        # 落点三处会各算各的，出现"建了目录又说目录不存在"这种怪现象。
+        try:
+            target = normalize_dir(target)
+        except ValueError as exc:
+            raise ProviderError(str(exc)) from exc
         self.store.run(
             "INSERT INTO tasks(id,provider,target,status,total,done,failed,error,links,credential,created_at,updated_at)"
             " VALUES(?,?,?,?,0,0,0,'',?,?,?,?)",
@@ -326,6 +333,24 @@ class TaskRunner:
                                 f"（已发现 {seen} 个文件），点「重试」可从中断处继续"
                             )
                         if entry.path in done_set:
+                            continue
+                        # 名字本身就不可能落盘的文件提前判掉：一批 20 个文件一起提交，
+                        # 混进一个超长名会让整批失败，用户只看到"转存失败"却不知道原因。
+                        bad = name_problem(entry.path.rsplit("/", 1)[-1])
+                        if bad:
+                            failed += 1
+                            seen += 1
+                            self.store.run(
+                                "INSERT INTO items(task_id,src,size,digest,dst,status,error)"
+                                " VALUES(?,?,?,?,?,?,?)"
+                                " ON CONFLICT(task_id,src) DO UPDATE SET status=excluded.status,"
+                                " dst=excluded.dst,error=excluded.error",
+                                (task_id, entry.path, entry.size, entry.digest, "", "failed", bad),
+                            )
+                            self.store.run(
+                                "UPDATE tasks SET total=?,failed=?,skipped=?,updated_at=? WHERE id=?",
+                                (done + len(queue), failed, skipped, now(), task_id),
+                            )
                             continue
                         want = f"{task['target'].rstrip('/')}{entry.path}"
                         if want in existing:

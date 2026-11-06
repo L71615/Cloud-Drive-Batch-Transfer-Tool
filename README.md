@@ -2,13 +2,13 @@
 
 ### 本地网盘批量转存 · 百度 / 夸克 / UC
 
-> ✅ **当前版本**：`v0.4.0` (2026-11-06) — 百度异步转存落点回填 + 同名文件三档策略
-> **上一版本**：`v0.3.1` (2026-11-06) — 桌面启动健壮性：窗口加载失败自动退回浏览器
-> 详见 [RELEASE-NOTES-v0.4.0.md](RELEASE-NOTES-v0.4.0.md) + [CHANGELOG.md](CHANGELOG.md)
+> ✅ **当前版本**：`v0.5.0` (2026-11-06) — 文件名与目录规范化：坏名字只影响它自己
+> **上一版本**：`v0.4.0` (2026-11-06) — 百度异步转存落点回填 + 同名文件三档策略
+> 详见 [RELEASE-NOTES-v0.5.0.md](RELEASE-NOTES-v0.5.0.md) + [CHANGELOG.md](CHANGELOG.md)
 
 **粘贴分享链接 → 自动读全目录 → 批量转存进自己的网盘 · 任务进度逐条可见 · 断点续跑 · 同名跳过/留副本/覆盖**
 
-![version](https://img.shields.io/badge/version-0.4.0-2b7cff)
+![version](https://img.shields.io/badge/version-0.5.0-2b7cff)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
 ![deps](https://img.shields.io/badge/dependencies-0-18a058)
 ![license](https://img.shields.io/badge/license-MIT-18a058)

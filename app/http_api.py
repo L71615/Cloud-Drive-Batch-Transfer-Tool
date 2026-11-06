@@ -394,7 +394,10 @@ class Handler(BaseHTTPRequestHandler):
                     (int(body["account_id"]), provider),
                 )
                 cred = (row or {}).get("credential", "")
-            task_id = self.app.runner.create_task(provider, links, target, cred)
+            try:
+                task_id = self.app.runner.create_task(provider, links, target, cred)
+            except ProviderError as exc:   # 目录非法之类，是用户能改的输入错误
+                return self._err(400, str(exc))
             return self._send(200, {"ok": True, "id": task_id})
 
         m = TASK_ACTION.match(path)

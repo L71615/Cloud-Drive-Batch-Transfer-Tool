@@ -337,6 +337,34 @@ class AdapterTest(unittest.TestCase):
         with self.assertRaises(ProviderError):
             p._wait_transfer("no-such-task")
 
+    def test_overlong_name_does_not_break_batch(self):
+        """一个超长文件名只让它自己失败，同批正常文件照样转存。"""
+        import os
+        import tempfile
+        from app.db import Store
+        from app.tasks import TaskRunner
+        from tools import mock_netdisk
+
+        sid = mock_netdisk.install_long_name()
+        tmp = tempfile.mkdtemp()
+        store = Store(os.path.join(tmp, "t.db"))
+        runner = TaskRunner(store, workers=1)
+        try:
+            tid = runner.create_task("quark", f"https://pan.quark.cn/s/{sid}", "/LongName", "__pus=abc")
+            v = self._wait(runner, tid)
+            self.assertEqual(v["status"], "done", v.get("error"))
+            self.assertEqual(v["done"], 1, "正常文件应该转存成功")
+            self.assertEqual(v["failed"], 1, "超长名应该被单独判失败")
+            items = store.all("SELECT src,status,error FROM items WHERE task_id=?", (tid,))
+            bad = [i for i in items if i["status"] == "failed"]
+            self.assertEqual(len(bad), 1)
+            self.assertIn("超过网盘上限", bad[0]["error"])
+        finally:
+            mock_netdisk.SHARE_TREES.pop(sid, None)
+            mock_netdisk.CD_SHARE.pop(sid, None)
+            runner.shutdown()
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
