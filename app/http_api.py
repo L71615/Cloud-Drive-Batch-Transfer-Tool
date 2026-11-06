@@ -21,6 +21,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -35,7 +36,10 @@ from .providers._http import trace_off, trace_on
 from .providers.base import AuthExpired, ProviderError, ProviderNotReady
 from .tasks import TaskRunner
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# 打包成单文件 exe 后，静态文件解压在 sys._MEIPASS 下；源码运行时用包目录。
+_BUNDLE = getattr(sys, "_MEIPASS", "")
+STATIC_DIR = os.path.join(_BUNDLE, "app", "static") if _BUNDLE else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "static")
 TASK_ACTION = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)/(pause|resume|cancel|retry)$")
 TASK_ONE = re.compile(r"^/api/tasks/([0-9a-zA-Z]+)$")
 ACCOUNT_ONE = re.compile(r"^/api/accounts/(\d+)$")
