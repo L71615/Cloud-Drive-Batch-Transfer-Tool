@@ -221,14 +221,17 @@ def find_browser() -> str:
     raise RuntimeError("没找到 Edge / Chrome，无法打开应用窗口")
 
 
-def open_window(url: str) -> subprocess.Popen:
+def _browser_args(url: str, mode: str) -> list:
+    """拼浏览器参数。mode: "app" 无地址栏应用窗口 / "new-window" 普通新窗口。"""
     exe = find_browser()
-    # 独立的浏览器 profile：窗口自带图标、不跟日常浏览器混在一起
     profile = os.path.join(data_dir(), "ui-profile")
     os.makedirs(profile, exist_ok=True)
-    args = [
-        exe,
-        f"--app={url}",
+    head = [exe]
+    if mode == "app":
+        head.append(f"--app={url}")
+    else:
+        head += ["--new-window", url]
+    return head + [
         "--window-size=1280,880",
         f"--user-data-dir={profile}",
         "--no-first-run",
@@ -239,98 +242,75 @@ def open_window(url: str) -> subprocess.Popen:
         "--disable-features=msEdgeWelcomePage,msImplicitSignin,EdgeSyncConsent,msEdgeSyncConsent",
         "--disable-background-networking",
     ]
-    if os.environ.get("PANTRANSFER_UI_TAB") == "1":
-        # 调试用：不开应用窗口，改成普通标签页，用来判断白屏是不是 --app 模式导致
-        args[1] = url
-    extra = os.environ.get("PANTRANSFER_UI_ARGS", "").strip()
-    if extra:
-        args += extra.split()
-    log("open window: " + " ".join(args))
-    # 打包后进程里带着 PyInstaller 自己的环境变量（_PYI_* / _MEI*），
-    # 还给 PATH 前面塞了 _internal 目录。这两件事都会害死浏览器的渲染进程：
-    # _internal 里带着 PyInstaller 打包的 msvcp140.dll / vcruntime140.dll 等，
-    # 浏览器子进程按 PATH 搜 DLL 时会先命中这些不兼容的副本，于是窗口白屏、
-    # 渲染进程不响应（标题停在 "127.0.0.1/"、CDP 的 Runtime.evaluate 超时）。
-    env = child_env()
-    if os.environ.get("PANTRANSFER_SHELL") == "1":
-        # 交给 Windows Shell 启动：浏览器进程不再是我们 exe 的子进程，
-        # 用于排查"打包后子进程渲染异常"这类环境问题。
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "open", args[0], " ".join(args[1:]), None, 1)
-        log(f"ShellExecuteW -> {rc}")
-        return None
-    # CREATE_NO_WINDOW：不要给浏览器弹出控制台
-    # 三路输出接到空设备：打包成 GUI 程序后自身没有标准句柄，
-    # 直接继承会让浏览器子进程拿到无效句柄（表现是窗口白屏、渲染进程不响应）。
-    return subprocess.Popen(
-        args,
-        creationflags=0x08000000 if os.name == "nt" else 0,
-        env=env,
+
+
+def _launch_via_start(args: list) -> None:
+    """用 `cmd /c start` 拉起浏览器。
+
+    不直接 Popen：由打包后的 exe 直接当浏览器父进程时，窗口能开但页面不渲染。
+    经过 cmd / start 这一层，浏览器不再是我们的直接子进程；同时继承环境
+    （传精简环境会让 explorer.exe 报 0xc0000142，浏览器也可能起不来）。
+    """
+    cmd = ["cmd.exe", "/c", "start", ""] + args
+    log("launch: " + " ".join(cmd[4:]))
+    subprocess.Popen(
+        cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=0x08000000,
     )
 
 
-def edge_shortcut(url: str) -> str:
-    """生成一个指向 Edge 应用窗口的快捷方式文件。
+def try_app_window(url: str, timeout: float = 18.0) -> bool:
+    """开无地址栏应用窗口，并确认页面真的渲染出来（窗口标题变成页面标题）。"""
+    try:
+        _launch_via_start(_browser_args(url, "app"))
+    except Exception as exc:
+        log(f"app window launch failed: {exc!r}")
+        return False
+    return wait_page_loaded(timeout)
 
-    为什么要绕这一圈：由**打包后的 exe** 直接 Popen 浏览器，窗口能开出来但页面不渲染
-    （标题停在 `127.0.0.1/`、渲染进程不响应）。同样的参数由 python 或桌面快捷方式
-    启动则正常，所以改成"让资源管理器去启动它"——进程不再是我们 exe 的子进程。
+
+def try_new_window(url: str, timeout: float = 18.0) -> bool:
+    """开普通浏览器新窗口（有地址栏），同样确认页面渲染。"""
+    try:
+        _launch_via_start(_browser_args(url, "new-window"))
+    except Exception as exc:
+        log(f"new window launch failed: {exc!r}")
+        return False
+    return wait_page_loaded(timeout)
+
+
+def open_in_browser(url: str) -> str:
+    """打开界面，返回实际成功的通道名。
+
+    三次尝试，每次都靠窗口标题确认"页面真的渲染出来了"，不是开个窗口就算成功：
+      1. 应用窗口（无地址栏）—— 最像桌面软件；
+      2. 普通浏览器新窗口（有地址栏）；
+      3. `os.startfile`，交给系统默认浏览器（可能开在已有窗口的新标签页）。
+
+    实测教训（别改回去）：
+    - 由打包后的 exe **直接 Popen 浏览器**时，窗口能开但页面不渲染（标题停在
+      `127.0.0.1/`、渲染进程不响应）；
+    - 给 `explorer.exe` 传**精简过的环境**会让它报 0xc0000142（Application Error），
+      所以所有拉起动作都继承环境，只有我们自己用的 PATH 才做处理。
     """
-    exe = find_browser()
-    profile = os.path.join(data_dir(), "ui-profile")
-    os.makedirs(profile, exist_ok=True)
-    lnk = os.path.join(data_dir(), "ui.lnk")
-    args = " ".join([
-        f"--app={url}",
-        "--window-size=1280,880",
-        f'--user-data-dir="{profile}"',
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-sync",
-        "--disable-extensions",
-        "--disable-component-update",
-        "--disable-features=msEdgeWelcomePage,msImplicitSignin,EdgeSyncConsent,msEdgeSyncConsent",
-        "--disable-background-networking",
-    ])
-    script = (
-        "$w = New-Object -ComObject WScript.Shell; "
-        f"$s = $w.CreateShortcut('{lnk}'); "
-        f"$s.TargetPath = '{exe}'; "
-        f"$s.Arguments = '{args}'; "
-        f"$s.WorkingDirectory = '{os.path.dirname(exe)}'; "
-        "$s.Save()"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        env=child_env(),
-        creationflags=0x08000000 if os.name == "nt" else 0,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=30,
-    )
-    return lnk
+    if os.environ.get("PANTRANSFER_NO_APPWINDOW") != "1":
+        if try_app_window(url):
+            return "app window"
+        log("app window did not render, trying a normal browser window")
+        if try_new_window(url):
+            return "browser window"
 
+    try:
+        os.startfile(url)
+        return "startfile"
+    except OSError as exc:
+        log(f"startfile failed: {exc!r}")
 
-def open_window_via_shell(url: str) -> None:
-    """借用资源管理器打开应用窗口：浏览器的父进程变成 explorer。"""
-    lnk = edge_shortcut(url)
-    log("open window via explorer: " + lnk)
-    subprocess.Popen(["explorer.exe", lnk], env=child_env())
-    return None
-
-
-def open_in_browser(url: str) -> None:
-    """用资源管理器打开链接：浏览器由 shell 启动，不是我们 exe 的子进程。
-
-    这条是实测唯一稳定的路：由打包后的 exe 直接 Popen 浏览器（`--app` 或普通标签页
-    都一样），窗口能开出来但页面不渲染——标题停在 `127.0.0.1/`、渲染进程不响应。
-    同样的 URL 交给 explorer 打开就正常，所以放弃"自己当父进程"。
-    """
-    log("open in browser via explorer: " + url)
-    subprocess.Popen(["explorer.exe", url], env=child_env())
-    return None
+    subprocess.Popen(["explorer.exe", url])   # 继承环境，绝不传 child_env()
+    return "explorer"
 
 
 def wait_idle(port: int, limit: float = 1800.0) -> None:
@@ -408,6 +388,9 @@ def message_box(text: str, title: str = APP_NAME) -> None:
 # ---------------------------------------------------------------- 主流程
 
 def main() -> int:
+    # --serve：只起服务，不碰浏览器。给 start_app.vbs 用——
+    # 由 exe 自己拉起浏览器时页面渲染不出来（实测），交给 wscript/explorer 一级就正常。
+    serve_only = "--serve" in sys.argv[1:]
     try:
         # 1. 已经有实例在跑？直接开窗口，不重复起服务
         for port in (remembered_port(), DEFAULT_PORT):
@@ -415,6 +398,8 @@ def main() -> int:
                 continue
             if health(port):
                 log(f"reuse running instance on {port}")
+                if serve_only:
+                    return 0
                 open_in_browser(f"http://127.0.0.1:{port}/")
                 wait_idle(port)
                 return 0
@@ -438,17 +423,21 @@ def main() -> int:
         log(f"server ready on {port}")
         url = f"http://127.0.0.1:{port}/"
 
-        # 3. 打开界面：交给资源管理器（默认浏览器）。
-        # 由 exe 自己 Popen 浏览器时，窗口能开但页面不渲染，见 open_in_browser 的注释。
+        # 3. 打开界面。--serve 模式不打开，交给外部（start_app.vbs）开。
+        if serve_only:
+            log("serve-only mode, not opening a window")
+            wait_idle(port)
+            log("idle, stopping server")
+            _stop(httpd)
+            return 0
+
         try:
-            open_in_browser(url)
+            how = open_in_browser(url)
+            log(f"opened via {how}: {url}")
         except Exception as exc:
-            log("explorer launch failed: " + repr(exc))
-            try:
-                os.startfile(url)          # 直接交给 ShellExecute
-            except Exception as exc2:
-                message_box(f"打不开界面：{exc2}\n\n请手动访问 {url}")
-                return 1
+            log("open interface failed: " + repr(exc))
+            message_box(f"打不开界面：{exc}\n\n请手动访问 {url}")
+            return 1
 
         if not wait_page_loaded(timeout=40.0):
             # 窗口标题没变成页面标题：可能浏览器还没加载完、也可能被弹窗挡住。
@@ -456,17 +445,21 @@ def main() -> int:
             log("page did not report itself loaded, keep server running")
         wait_idle(port)
         log("window closed, stopping server")
-        try:
-            httpd.shutdown()
-            httpd.server_close()
-            httpd.app.close()
-        except Exception:
-            pass
+        _stop(httpd)
         return 0
     except Exception as exc:
         log("fatal: " + traceback.format_exc())
         message_box(f"启动失败：{exc}\n\n日志：{os.path.join(log_dir(), 'launcher.log')}")
         return 1
+
+
+def _stop(httpd) -> None:
+    try:
+        httpd.shutdown()
+        httpd.server_close()
+        httpd.app.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

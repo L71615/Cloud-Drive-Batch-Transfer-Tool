@@ -3,4 +3,4 @@
 
 仅使用 Python 标准库：http.server / sqlite3 / urllib / threading。
 """
-__version__ = "0.5.1"
+__version__ = "0.5.2"

@@ -2,13 +2,13 @@
 
 ### 本地网盘批量转存 · 百度 / 夸克 / UC
 
-> ✅ **当前版本**：`v0.5.1` (2026-11-07) — 桌面版双击真的能打开界面了
-> **上一版本**：`v0.5.0` (2026-11-06) — 文件名与目录规范化：坏名字只影响它自己
-> 详见 [RELEASE-NOTES-v0.5.1.md](RELEASE-NOTES-v0.5.1.md) + [CHANGELOG.md](CHANGELOG.md)
+> ✅ **当前版本**：`v0.5.2` (2026-11-07) — 桌面版换启动方式：快捷方式开应用窗口，不再报 explorer 错误
+> **上一版本**：`v0.5.1` (2026-11-07) — 桌面版双击真的能打开界面了
+> 详见 [RELEASE-NOTES-v0.5.2.md](RELEASE-NOTES-v0.5.2.md) + [CHANGELOG.md](CHANGELOG.md)
 
 **粘贴分享链接 → 自动读全目录 → 批量转存进自己的网盘 · 任务进度逐条可见 · 断点续跑 · 同名跳过/留副本/覆盖**
 
-![version](https://img.shields.io/badge/version-0.5.1-2b7cff)
+![version](https://img.shields.io/badge/version-0.5.2-2b7cff)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
 ![deps](https://img.shields.io/badge/dependencies-0-18a058)
 ![license](https://img.shields.io/badge/license-MIT-18a058)
@@ -32,16 +32,25 @@
 build.bat          # 双击：打包成 dist\PanTransfer\PanTransfer.exe，并创建桌面快捷方式
 ```
 
-之后桌面上就有 **PanTransfer 图标**，双击它：服务在本进程内起来，界面在默认浏览器里打开，任务栏有图标。
+之后桌面上就有 **PanTransfer 图标**，双击它：服务在本机起来，界面以**无地址栏的应用窗口**打开（1280×880，任务栏有图标）。
 
-细节：
+启动链是这样的（[start_app.vbs](start_app.vbs)）：
 
-- 图标是内嵌在 exe 里的，窗口标签页的图标来自页面 favicon；图标由 [tools/make_icon.py](tools/make_icon.py) 用标准库现画（不依赖任何图片素材）。
-- 界面由 `explorer.exe` 打开（不是 exe 自己拉浏览器）——打包后的 exe 直接拉浏览器会白屏，这条是实测结论，别改回去。
-- 数据和日志都在 `<程序目录>\data\`（整个文件夹可以拷到 U 盘带走）；重新打包不会动这个目录。
-- 端口默认 8765，被别的程序占了会自动往下找，并且把选中的端口记在 `data\current_port`；第二次双击会复用已开的实例，不会起两个。
+```
+快捷方式 → wscript start_app.vbs
+         → cmd /c start PanTransfer.exe --serve   （只起服务）
+         → 等 /api/health 通过
+         → cmd /c start msedge --app=http://127.0.0.1:<port>/
+```
+
+几条实测结论，改代码前先看：
+
+- **exe 自己 `Popen` 浏览器 → 页面不渲染**（窗口开出来、标题停在 `127.0.0.1/`、渲染进程无响应）。所以 `--serve` 模式只起服务。
+- **给 `explorer.exe` 传精简环境 → `0xc0000142`**（应用程序无法正常启动）。所有拉起动作都继承环境。
+- 数据、日志、浏览器 profile 都在 `dist\PanTransfer\data\`；重新打包不会动这个目录。
+- 端口默认 8765，被占了自动往下找，端口写在 `data\current_port`；重复双击不会起第二个服务。
 - 页面 30 分钟没人访问，服务自动退出；想立刻关就结束 `PanTransfer.exe`。
-- 已经打包好但快捷方式丢了：双击 [make_shortcut.bat](make_shortcut.bat) 重建。
+- 快捷方式丢了：双击 [make_shortcut.bat](make_shortcut.bat) 重建（它指向 `wscript.exe start_app.vbs`，不是直接指向 exe）。
 
 ## 快速开始
 

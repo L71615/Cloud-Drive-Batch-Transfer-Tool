@@ -44,8 +44,15 @@ if errorlevel 1 (
 
 echo [3/3] 拷到 dist（保留 data 目录）
 robocopy build_dist\PanTransfer dist\PanTransfer /MIR /XD data /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 (
+  echo 拷贝失败，检查 dist\PanTransfer 是否还在被占用（先结束 PanTransfer.exe）。
+  pause
+  exit /b 1
+)
+copy /y start_app.vbs "dist\PanTransfer\start_app.vbs" >nul
 
 echo.
 echo 打包完成：dist\PanTransfer\PanTransfer.exe
-echo 现在创建桌面快捷方式...call make_shortcut.bat
+echo 现在创建桌面快捷方式...
+call make_shortcut.bat
 pause

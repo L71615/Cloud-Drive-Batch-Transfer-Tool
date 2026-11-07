@@ -8,6 +8,9 @@ if not exist "%EXE%" (
   pause
   exit /b 1
 )
+if not exist "%~dp0dist\PanTransfer\start_app.vbs" (
+  copy /y "%~dp0start_app.vbs" "%~dp0dist\PanTransfer\start_app.vbs" >nul
+)
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\make_shortcut.ps1" -Exe "%EXE%"
 if errorlevel 1 (
