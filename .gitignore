@@ -31,3 +31,5 @@ dist/
 *.swp
 .DS_Store
 *.spec
+build_dist/
+build_work/

@@ -22,9 +22,13 @@ if errorlevel 1 (
 echo [1/2] 生成图标
 python tools\make_icon.py
 
-echo [2/2] 打包 exe（约 10-20 秒）
+echo [2/3] 打包 exe（约 10-20 秒）
+REM 先打到 build_dist，再拷进 dist —— 否则 PyInstaller 会清空 dist\PanTransfer，
+REM 连同 data\ 里的数据库、登录态、日志一起删掉。
 python -m PyInstaller --noconfirm --onedir --noconsole ^
   --name PanTransfer ^
+  --distpath build_dist ^
+  --workpath build_work ^
   --icon "app\static\favicon.ico" ^
   --add-data "app\static;app\static" ^
   --hidden-import app.http_api ^
@@ -38,8 +42,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo [3/3] 拷到 dist（保留 data 目录）
+robocopy build_dist\PanTransfer dist\PanTransfer /MIR /XD data /NFL /NDL /NJH /NJS /NP >nul
+
 echo.
 echo 打包完成：dist\PanTransfer\PanTransfer.exe
-echo 现在创建桌面快捷方式...
-call make_shortcut.bat
+echo 现在创建桌面快捷方式...call make_shortcut.bat
 pause

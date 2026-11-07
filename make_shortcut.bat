@@ -9,8 +9,12 @@ if not exist "%EXE%" (
   exit /b 1
 )
 
-powershell -NoProfile -Command ^
-  "$exe='%EXE%'; $wd=Split-Path $exe; $sh=New-Object -ComObject WScript.Shell; foreach($d in @(\"$env:USERPROFILE\Desktop\", \"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\")){ $l=Join-Path $d 'PanTransfer.lnk'; $s=$sh.CreateShortcut($l); $s.TargetPath=$exe; $s.WorkingDirectory=$wd; $s.IconLocation=\"$exe,0\"; $s.Description='PanTransfer 网盘批量转存'; $s.Save(); Write-Host \"快捷方式：$l\" }"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\make_shortcut.ps1" -Exe "%EXE%"
+if errorlevel 1 (
+  echo 创建快捷方式失败。
+  pause
+  exit /b 1
+)
 
 echo.
 echo 完成。桌面上双击 PanTransfer 图标即可打开。

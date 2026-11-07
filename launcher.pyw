@@ -170,7 +170,51 @@ BROWSER_CANDIDATES = [
 ]
 
 
+def child_env() -> dict:
+    """给浏览器子进程的环境：只留系统必需项。
+
+    排查结论：由打包后的 exe 启动浏览器时，窗口能开但页面不渲染（标题停在
+    `127.0.0.1/`、渲染进程不响应）；同样的参数由 python 启动就正常。
+    差异只可能在继承的环境变量里——PyInstaller 会给进程塞 `_PYI_*`、`_MEI*`
+    并把 `_internal` 拼到 PATH 前面。所以这里干脆从零搭一份最小环境，
+    不继承任何可疑项。
+    """
+    sysroot = os.environ.get("SystemRoot") or r"C:\Windows"
+    keep = {
+        "SystemRoot": sysroot,
+        "SystemDrive": os.environ.get("SystemDrive") or "C:",
+        "windir": sysroot,
+        "TEMP": os.environ.get("TEMP") or os.path.join(sysroot, "Temp"),
+        "TMP": os.environ.get("TMP") or os.path.join(sysroot, "Temp"),
+        "USERPROFILE": os.environ.get("USERPROFILE", ""),
+        "APPDATA": os.environ.get("APPDATA", ""),
+        "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
+        "ProgramData": os.environ.get("ProgramData", ""),
+        "ProgramFiles": os.environ.get("ProgramFiles", ""),
+        "PROGRAMFILES(X86)": os.environ.get("PROGRAMFILES(X86)", ""),
+        "HOMEDRIVE": os.environ.get("HOMEDRIVE", ""),
+        "HOMEPATH": os.environ.get("HOMEPATH", ""),
+        "USERNAME": os.environ.get("USERNAME", ""),
+        "USERDOMAIN": os.environ.get("USERDOMAIN", ""),
+        "COMPUTERNAME": os.environ.get("COMPUTERNAME", ""),
+        "NUMBER_OF_PROCESSORS": os.environ.get("NUMBER_OF_PROCESSORS", "1"),
+        "PROCESSOR_ARCHITECTURE": os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64"),
+        "OS": "Windows_NT",
+        "COMSPEC": os.environ.get("COMSPEC") or os.path.join(sysroot, "system32", "cmd.exe"),
+        "PATHEXT": os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD",
+        "PATH": os.pathsep.join([
+            os.path.join(sysroot, "system32"),
+            sysroot,
+            os.path.join(sysroot, "System32", "Wbem"),
+        ]),
+    }
+    return {k: v for k, v in keep.items() if v}
+
+
 def find_browser() -> str:
+    forced = os.environ.get("PANTRANSFER_BROWSER_EXE", "").strip()
+    if forced and os.path.exists(forced):
+        return forced
     for p in BROWSER_CANDIDATES:
         if p and os.path.exists(p):
             return p
@@ -203,9 +247,11 @@ def open_window(url: str) -> subprocess.Popen:
         args += extra.split()
     log("open window: " + " ".join(args))
     # 打包后进程里带着 PyInstaller 自己的环境变量（_PYI_* / _MEI*），
-    # 传给浏览器会让它的渲染进程起不来（窗口白屏），这里清掉。
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("_PYI", "_MEI", "PYINSTALLER"))}
+    # 还给 PATH 前面塞了 _internal 目录。这两件事都会害死浏览器的渲染进程：
+    # _internal 里带着 PyInstaller 打包的 msvcp140.dll / vcruntime140.dll 等，
+    # 浏览器子进程按 PATH 搜 DLL 时会先命中这些不兼容的副本，于是窗口白屏、
+    # 渲染进程不响应（标题停在 "127.0.0.1/"、CDP 的 Runtime.evaluate 超时）。
+    env = child_env()
     if os.environ.get("PANTRANSFER_SHELL") == "1":
         # 交给 Windows Shell 启动：浏览器进程不再是我们 exe 的子进程，
         # 用于排查"打包后子进程渲染异常"这类环境问题。
@@ -223,6 +269,68 @@ def open_window(url: str) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def edge_shortcut(url: str) -> str:
+    """生成一个指向 Edge 应用窗口的快捷方式文件。
+
+    为什么要绕这一圈：由**打包后的 exe** 直接 Popen 浏览器，窗口能开出来但页面不渲染
+    （标题停在 `127.0.0.1/`、渲染进程不响应）。同样的参数由 python 或桌面快捷方式
+    启动则正常，所以改成"让资源管理器去启动它"——进程不再是我们 exe 的子进程。
+    """
+    exe = find_browser()
+    profile = os.path.join(data_dir(), "ui-profile")
+    os.makedirs(profile, exist_ok=True)
+    lnk = os.path.join(data_dir(), "ui.lnk")
+    args = " ".join([
+        f"--app={url}",
+        "--window-size=1280,880",
+        f'--user-data-dir="{profile}"',
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-sync",
+        "--disable-extensions",
+        "--disable-component-update",
+        "--disable-features=msEdgeWelcomePage,msImplicitSignin,EdgeSyncConsent,msEdgeSyncConsent",
+        "--disable-background-networking",
+    ])
+    script = (
+        "$w = New-Object -ComObject WScript.Shell; "
+        f"$s = $w.CreateShortcut('{lnk}'); "
+        f"$s.TargetPath = '{exe}'; "
+        f"$s.Arguments = '{args}'; "
+        f"$s.WorkingDirectory = '{os.path.dirname(exe)}'; "
+        "$s.Save()"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        env=child_env(),
+        creationflags=0x08000000 if os.name == "nt" else 0,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    return lnk
+
+
+def open_window_via_shell(url: str) -> None:
+    """借用资源管理器打开应用窗口：浏览器的父进程变成 explorer。"""
+    lnk = edge_shortcut(url)
+    log("open window via explorer: " + lnk)
+    subprocess.Popen(["explorer.exe", lnk], env=child_env())
+    return None
+
+
+def open_in_browser(url: str) -> None:
+    """用资源管理器打开链接：浏览器由 shell 启动，不是我们 exe 的子进程。
+
+    这条是实测唯一稳定的路：由打包后的 exe 直接 Popen 浏览器（`--app` 或普通标签页
+    都一样），窗口能开出来但页面不渲染——标题停在 `127.0.0.1/`、渲染进程不响应。
+    同样的 URL 交给 explorer 打开就正常，所以放弃"自己当父进程"。
+    """
+    log("open in browser via explorer: " + url)
+    subprocess.Popen(["explorer.exe", url], env=child_env())
+    return None
 
 
 def wait_idle(port: int, limit: float = 1800.0) -> None:
@@ -307,7 +415,8 @@ def main() -> int:
                 continue
             if health(port):
                 log(f"reuse running instance on {port}")
-                open_window(f"http://127.0.0.1:{port}/").wait()
+                open_in_browser(f"http://127.0.0.1:{port}/")
+                wait_idle(port)
                 return 0
 
         # 2. 起服务：逐个端口试，谁先应答就用谁
@@ -329,40 +438,23 @@ def main() -> int:
         log(f"server ready on {port}")
         url = f"http://127.0.0.1:{port}/"
 
-        # 3. 开应用窗口，窗口关掉就退出
+        # 3. 打开界面：交给资源管理器（默认浏览器）。
+        # 由 exe 自己 Popen 浏览器时，窗口能开但页面不渲染，见 open_in_browser 的注释。
         try:
-            proc = open_window(url)
+            open_in_browser(url)
         except Exception as exc:
-            message_box(f"打不开应用窗口：{exc}\n\n已用默认浏览器打开。")
-            webbrowser.open(url)
+            log("explorer launch failed: " + repr(exc))
             try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                pass
-            return 1
+                os.startfile(url)          # 直接交给 ShellExecute
+            except Exception as exc2:
+                message_box(f"打不开界面：{exc2}\n\n请手动访问 {url}")
+                return 1
 
-        if proc is None:
-            # Shell 启动拿不到进程句柄：改成轮询窗口是否还在
-            if not wait_page_loaded():
-                log("window did not show the page, opening default browser")
-                webbrowser.open(url)
-                wait_idle(port)
-            else:
-                wait_window_gone(port)
-        else:
-            if not wait_page_loaded():
-                # 应用窗口起不来（个别环境的浏览器问题）：关掉白窗口，退回默认浏览器，
-                # 界面一样能用，只是多了地址栏。
-                log("window did not show the page, opening default browser")
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                webbrowser.open(url)
-                wait_idle(port)
-            else:
-                proc.wait()
+        if not wait_page_loaded(timeout=40.0):
+            # 窗口标题没变成页面标题：可能浏览器还没加载完、也可能被弹窗挡住。
+            # 不退出——服务继续跑，用户自己刷新页面即可。
+            log("page did not report itself loaded, keep server running")
+        wait_idle(port)
         log("window closed, stopping server")
         try:
             httpd.shutdown()

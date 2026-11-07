@@ -2,13 +2,13 @@
 
 ### 本地网盘批量转存 · 百度 / 夸克 / UC
 
-> ✅ **当前版本**：`v0.5.0` (2026-11-06) — 文件名与目录规范化：坏名字只影响它自己
-> **上一版本**：`v0.4.0` (2026-11-06) — 百度异步转存落点回填 + 同名文件三档策略
-> 详见 [RELEASE-NOTES-v0.5.0.md](RELEASE-NOTES-v0.5.0.md) + [CHANGELOG.md](CHANGELOG.md)
+> ✅ **当前版本**：`v0.5.1` (2026-11-07) — 桌面版双击真的能打开界面了
+> **上一版本**：`v0.5.0` (2026-11-06) — 文件名与目录规范化：坏名字只影响它自己
+> 详见 [RELEASE-NOTES-v0.5.1.md](RELEASE-NOTES-v0.5.1.md) + [CHANGELOG.md](CHANGELOG.md)
 
 **粘贴分享链接 → 自动读全目录 → 批量转存进自己的网盘 · 任务进度逐条可见 · 断点续跑 · 同名跳过/留副本/覆盖**
 
-![version](https://img.shields.io/badge/version-0.5.0-2b7cff)
+![version](https://img.shields.io/badge/version-0.5.1-2b7cff)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
 ![deps](https://img.shields.io/badge/dependencies-0-18a058)
 ![license](https://img.shields.io/badge/license-MIT-18a058)
@@ -28,22 +28,20 @@
 
 ## 桌面版（双击即开）
 
-不想看到浏览器地址栏，就把程序打成桌面软件：
-
 ```bash
 build.bat          # 双击：打包成 dist\PanTransfer\PanTransfer.exe，并创建桌面快捷方式
 ```
 
-之后桌面上就有 **PanTransfer 图标**，双击直接弹出独立窗口（无地址栏、无标签页、任务栏有图标），关掉窗口服务自动退出。
+之后桌面上就有 **PanTransfer 图标**，双击它：服务在本进程内起来，界面在默认浏览器里打开，任务栏有图标。
 
 细节：
 
-- 图标是内嵌在 exe 里的，窗口标题栏/任务栏用的同一张；图标由 [tools/make_icon.py](tools/make_icon.py) 用标准库现画（不依赖任何图片素材）。
-- 窗口是用系统 Edge/Chrome 的 `--app` 模式打开的，**独立 profile**，不碰你日常浏览器的书签和登录态。
-- 数据和日志都在 `<程序目录>\data\`（整个文件夹可以拷到 U 盘带走）；想换地方就挪文件夹。
+- 图标是内嵌在 exe 里的，窗口标签页的图标来自页面 favicon；图标由 [tools/make_icon.py](tools/make_icon.py) 用标准库现画（不依赖任何图片素材）。
+- 界面由 `explorer.exe` 打开（不是 exe 自己拉浏览器）——打包后的 exe 直接拉浏览器会白屏，这条是实测结论，别改回去。
+- 数据和日志都在 `<程序目录>\data\`（整个文件夹可以拷到 U 盘带走）；重新打包不会动这个目录。
 - 端口默认 8765，被别的程序占了会自动往下找，并且把选中的端口记在 `data\current_port`；第二次双击会复用已开的实例，不会起两个。
+- 页面 30 分钟没人访问，服务自动退出；想立刻关就结束 `PanTransfer.exe`。
 - 已经打包好但快捷方式丢了：双击 [make_shortcut.bat](make_shortcut.bat) 重建。
-- 极少数机器上应用窗口会打不开（浏览器渲染异常）：程序会在 25 秒后自动关掉那个空窗口，改用默认浏览器打开同一界面，功能完全一样，只是多了地址栏；这种模式下 30 分钟没人操作会自动退出，不会留后台进程。
 
 ## 快速开始
 
